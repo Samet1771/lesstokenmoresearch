@@ -18,7 +18,7 @@ from pathlib import Path
 from . import docker_mgr
 from .brief import Brief
 from .config import Config
-from .extract import EXTRACT_TOKENS, Extract, extract_many, rank, saved_tokens, thinking_share
+from .extract import EXTRACT_HEADROOM, Extract, extract_many, rank, saved_tokens, thinking_share
 from .fetch import FetchStats, Page, fetch_many
 from .llm import estimate_tokens
 from .report import fallback_report, header, run_roles, write_report
@@ -209,7 +209,7 @@ async def run(
         writer.agent(f"scout-{index % readers + 1}", "idle", "", extract.relevance if extract.usable else None)
         writer.progress("read", len(pages) + read_done, len(shortlist) * 2)
 
-    warning = residency.context_warning(config.model.for_role("fast"), EXTRACT_TOKENS + 7000)
+    warning = residency.context_warning(config.model.for_role("fast"), EXTRACT_HEADROOM + 7000)
     if warning:
         writer.note(warning, "warn")
 
@@ -293,7 +293,7 @@ async def run(
     writer.stage("write", "run")
     writer.agent("editor", "write", "report.md")
     try:
-        body = await write_report(brief, ordered, memos, report_model, max_tokens=4500 if effort == "high" else 3500)
+        body = await write_report(brief, ordered, memos, report_model)
     except Exception as error:  # noqa: BLE001 - the evidence is worth delivering regardless
         writer.note(f"editor failed: {type(error).__name__} — writing raw findings", "warn")
         body = ""

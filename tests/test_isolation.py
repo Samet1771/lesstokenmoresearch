@@ -12,9 +12,11 @@ import unittest
 
 import httpx
 
+from ltms.brief import from_topic
 from ltms.config import ModelConfig
-from ltms.extract import extract_many
+from ltms.extract import Extract, extract_many
 from ltms.fetch import Page
+from ltms.report import write_report
 
 
 def pages(count: int) -> list[Page]:
@@ -62,6 +64,30 @@ def run_extraction(page_list: list[Page], concurrency: int = 1) -> list[dict]:
     return sent
 
 
+def run_report() -> list[dict]:
+    sent: list[dict] = []
+    original = httpx.AsyncClient
+
+    class Mocked(original):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(capture(sent))
+            super().__init__(*args, **kwargs)
+
+    httpx.AsyncClient = Mocked
+    try:
+        asyncio.run(
+            write_report(
+                from_topic("sqlite wal", 3),
+                [Extract(url="https://a.test/p", title="A", facts=["a fact"], relevance=0.8)],
+                [],
+                ModelConfig(name="m"),
+            )
+        )
+    finally:
+        httpx.AsyncClient = original
+    return sent
+
+
 class ReaderIsolation(unittest.TestCase):
     def test_one_request_per_page(self):
         self.assertEqual(len(run_extraction(pages(3))), 3)
@@ -85,11 +111,28 @@ class ReaderIsolation(unittest.TestCase):
         # Identical pages, so identical prompts. A conversation would grow.
         self.assertEqual(len(set(sizes)), 1, sizes)
 
+    def test_no_request_sets_an_output_limit(self):
+        # The server decides how long an answer may be. A second limit set from
+        # here can only be the wrong number: too low truncates the JSON, too
+        # high does nothing.
+        for body in run_extraction(pages(2)):
+            self.assertNotIn("max_tokens", body)
+
     def test_isolation_holds_when_readers_run_in_parallel(self):
         bodies = run_extraction(pages(4), concurrency=4)
         self.assertEqual(len(bodies), 4)
         for body in bodies:
             self.assertEqual(len(body["messages"]), 2)
+
+
+class NoOutputCaps(unittest.TestCase):
+    """ltms sets no response-length limit anywhere. LM Studio (or whichever
+    server is in use) already has one configured, and a second number chosen
+    here could only be the wrong one."""
+
+    def test_the_editor_does_not_cap_the_report(self):
+        for body in run_report():
+            self.assertNotIn("max_tokens", body)
 
 
 if __name__ == "__main__":

@@ -44,11 +44,11 @@ Rules:
 
 MAX_PAGE_CHARS = 24_000  # about 6k tokens, comfortably inside a small context
 
-# Generous on purpose. Reasoning models spend 1000+ tokens thinking before they
-# write anything, and a budget that runs out mid-thought returns nothing at all
-# -- the whole page fetch wasted. Instruct models simply stop early and cost
-# nothing extra.
-EXTRACT_TOKENS = 2600
+# Not a cap -- ltms sets no output limit, because the server already has one and
+# a second number set from here can only be the wrong one. This is how much room
+# a reader's answer realistically needs, used to warn up front when the loaded
+# context is too small to hold a page plus its reply.
+EXTRACT_HEADROOM = 2600
 
 # A server refusing a prompt because it will not fit. Wording differs per
 # backend, so match the shapes rather than one product's message.
@@ -231,7 +231,6 @@ async def extract_many(
             reply = await model.chat(
                 system=SYSTEM,
                 user=build_prompt(topic, instructions, page, limit),
-                max_tokens=EXTRACT_TOKENS,
                 temperature=0.1,
                 client=client,
                 # Structured output: the JSON is often inside the thinking.

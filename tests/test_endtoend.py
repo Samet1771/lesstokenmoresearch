@@ -80,7 +80,7 @@ async def fake_roles(brief, findings, model_config, count, on_start=None, on_don
     return [("builder", "the evidence says one writer [1]")]
 
 
-async def fake_write(brief, findings, memos, model_config, max_tokens=3500):
+async def fake_write(brief, findings, memos, model_config):
     return "## findings\nOnly one writer at a time [1].\n\n## sources\n[1] Page 0 — https://site0.test/p"
 
 

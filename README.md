@@ -316,6 +316,12 @@ throughput decides the length of a run; writing the report is a couple of calls
 where quality shows. The two phases never overlap, so both models do not have
 to fit in VRAM at once — ltms unloads the reader before the writer loads.
 
+**ltms sets no response-length limit.** Your server already has one — in LM
+Studio it is the model's max response tokens — and a second number chosen here
+could only be the wrong one: too low truncates an answer mid-sentence, too high
+does nothing. If a model runs out of room before it answers, raise the limit
+where you set it.
+
 **Avoid reasoning models for either role.** They spend their budget thinking
 before they answer, and locally that is pure latency. The same brief, same six
 pages, on one 16 GB machine:

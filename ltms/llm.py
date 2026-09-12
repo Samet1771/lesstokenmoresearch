@@ -119,7 +119,7 @@ class LocalModel:
         self,
         system: str,
         user: str,
-        max_tokens: int = 800,
+        max_tokens: int | None = None,
         temperature: float = 0.2,
         client: httpx.AsyncClient | None = None,
         timeout: float = 180.0,
@@ -129,7 +129,12 @@ class LocalModel:
         comes back empty. Right for structured output, where the JSON is often
         sitting in the scratchpad. Wrong for prose: a model's reasoning is its
         working out, not its answer, and returning it produces a "report" that
-        is a transcript of deliberation."""
+        is a transcript of deliberation.
+
+        max_tokens is left unset by default: the server already has a limit
+        configured, and a second one set from here can only be the wrong number.
+        Guess low and answers arrive truncated; guess high and it does nothing.
+        """
         owns = client is None
         client = client or httpx.AsyncClient(timeout=timeout)
         try:
@@ -142,18 +147,17 @@ class LocalModel:
                 await client.aclose()
 
     async def _ollama(
-        self, client: httpx.AsyncClient, system: str, user: str, max_tokens: int, temperature: float
+        self, client: httpx.AsyncClient, system: str, user: str, max_tokens: int | None, temperature: float
     ) -> Reply:
+        options: dict = {"num_ctx": self.config.context_tokens, "temperature": temperature}
+        if max_tokens:
+            options["num_predict"] = max_tokens
         payload = {
             "model": self._resolved,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "stream": False,
             "think": False,
-            "options": {
-                "num_predict": max_tokens,
-                "num_ctx": self.config.context_tokens,
-                "temperature": temperature,
-            },
+            "options": options,
         }
         try:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
@@ -173,20 +177,21 @@ class LocalModel:
         )
 
     async def _openai(
-        self, client: httpx.AsyncClient, system: str, user: str, max_tokens: int,
+        self, client: httpx.AsyncClient, system: str, user: str, max_tokens: int | None,
         temperature: float, accept_reasoning: bool = False,
     ) -> Reply:
         base = self.openai_base
         payload: dict = {
             "model": self._resolved,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
             # Understood by LM Studio and vLLM for Qwen-style reasoning models.
             # Servers that do not know it either ignore it or 400, and we retry.
             "chat_template_kwargs": {"enable_thinking": False},
         }
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
         try:
             response = await client.post(f"{base}/chat/completions", json=payload)
             if response.status_code >= 400 and "chat_template_kwargs" in response.text:
@@ -210,12 +215,14 @@ class LocalModel:
             text = strip_thinking(reasoning)
 
         if not text:
-            spent = " and ran out of room" if choice.get("finish_reason") == "length" else ""
-            raise ModelError(
-                f"{self._resolved} produced no answer{spent} — it spent the whole "
-                f"{max_tokens}-token budget thinking. Give it more room, or use a model "
-                "that does not reason for this step."
-            )
+            if choice.get("finish_reason") == "length":
+                raise ModelError(
+                    f"{self._resolved} hit its output limit while still thinking and "
+                    "answered nothing. Raise the server's response-length cap "
+                    "(LM Studio: the model's max response tokens), or use a model "
+                    "that does not reason for this step."
+                )
+            raise ModelError(f"{self._resolved} returned an empty answer")
 
         return Reply(
             text=text,

@@ -115,7 +115,7 @@ async def run_roles(
                 if part
             )
             try:
-                reply = await model.chat(system=system, user=user, max_tokens=2200, temperature=0.2, client=client)
+                reply = await model.chat(system=system, user=user, temperature=0.2, client=client)
                 memos[index] = (role.id, reply.text.strip())
             except (ModelError, Exception):  # noqa: BLE001 - a missing memo is survivable
                 memos[index] = (role.id, "")
@@ -154,7 +154,6 @@ async def write_report(
     findings: list[Extract],
     memos: list[tuple[str, str]],
     model_config: ModelConfig,
-    max_tokens: int = 3500,
 ) -> str:
     model = LocalModel(model_config)
     memo_block = "\n\n".join(f"ANALYST {role_id}:\n{memo}" for role_id, memo in memos)
@@ -173,20 +172,10 @@ async def write_report(
     )
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(1800.0, connect=10.0)) as client:
-        try:
-            reply = await model.chat(
-                system=EDITOR_SYSTEM, user=user, max_tokens=max_tokens, temperature=0.2, client=client
-            )
-        except ModelError as error:
-            # A reasoning model can spend the whole budget deliberating and emit
-            # nothing. This is the last step of a run that has already fetched
-            # and read everything, so one more attempt with real room is cheap
-            # next to throwing the work away.
-            if "thinking" not in str(error):
-                raise
-            reply = await model.chat(
-                system=EDITOR_SYSTEM, user=user, max_tokens=max_tokens * 3, temperature=0.2, client=client
-            )
+        # No output cap: the report is the one place where cutting the answer
+        # short wastes the entire run, and the server's own limit already
+        # decides how long an answer may be.
+        reply = await model.chat(system=EDITOR_SYSTEM, user=user, temperature=0.2, client=client)
     return reply.text.strip()
 
 
