@@ -39,10 +39,27 @@ from .pipeline import EFFORTS, run_sync
 from .runs import PROGRESS_FILE, RunState, RunWriter, load_state, new_run_id, resolve_run
 from .ui import AGENT_STATE, SPINNER, _bar, _fmt_count, _fmt_elapsed, _short_url
 
+MASCOT = "(ᵔᴗᵔ)"
+
+# The mascot reacts to the stage in flight. Small, but it is the difference
+# between a tool that is working and a tool that has hung.
+MOODS: dict[str, tuple[str, str]] = {
+    "idle": ("(ᵔᴗᵔ)", "cyan"),
+    "plan": ("(·ᴗ·)", "cyan"),
+    "search": ("(◕ᴗ◕)", "cyan"),
+    "filter": ("(⌐ᴗ⌐)", "cyan"),
+    "read": ("(◉ᴗ◉)", "green"),
+    "rank": ("(★ᴗ★)", "green"),
+    "debate": ("(・ヘ・)", "magenta"),
+    "write": ("(✎ᴗ✎)", "yellow"),
+    "done": ("(ᵔᴗᵔ)✧", "green"),
+    "fail": ("(╥ᴗ╥)", "red"),
+}
+
 BANNER = r""" _   _____ __  __ ___
 | | |_   _|  \/  / __|   [b]LessTokenMoreSearch[/b]
 | |__ | | | |\/| \__ \   [dim]fewer tokens, more search[/dim]
-|____||_| |_|  |_|___/"""
+|____||_| |_|  |_|___/   [dim]type a topic · /help · ctrl+c to quit[/dim]"""
 
 HELP = """[b]research[/b]
   [cyan]<topic>[/cyan]                 research a topic straight away
@@ -88,6 +105,13 @@ def _model_options(servers: list[DetectedServer]) -> list[tuple[str, str]]:
     return options
 
 
+def _short_model(name: str, width: int = 22) -> str:
+    """Local model names run long; the status bar has one line."""
+    if len(name) <= width:
+        return name
+    return name[: width - 1] + "…"
+
+
 def _match(servers: list[DetectedServer], base_url: str, name: str) -> str | None:
     if not name:
         return None
@@ -106,7 +130,10 @@ def _match(servers: list[DetectedServer], base_url: str, name: str) -> str | Non
 class ModelsScreen(ModalScreen[str]):
     """Pick the two models. Dismisses with a line for the transcript."""
 
-    BINDINGS = [Binding("escape", "cancel", "cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel"),
+        Binding("ctrl+s", "save", "save"),
+    ]
 
     def __init__(self, config: Config, servers: list[DetectedServer]) -> None:
         super().__init__()
@@ -115,41 +142,49 @@ class ModelsScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal"):
-            yield Label("models", classes="modal-title")
-            yield Static(id="servers", classes="hint")
+            yield Static(f"{MASCOT}  [b]models[/b]", classes="modal-title")
+            # The body scrolls, the footer never does. Before this the buttons
+            # were laid out below the bottom of the screen, so there was no way
+            # to save at all.
+            with VerticalScroll(id="modal-body"):
+                yield Static(id="servers", classes="hint")
 
-            yield Label("report model", classes="field-label")
-            yield Static("writes the findings — quality shows here", classes="hint")
-            yield Select([], id="report-model", prompt="use whatever is loaded")
+                yield Label("report model", classes="field-label")
+                yield Static("writes the findings — quality shows here", classes="hint")
+                yield Select([], id="report-model", prompt="whatever is loaded")
 
-            yield Label("reading model", classes="field-label")
-            yield Static("reads every page — throughput decides the length of a run", classes="hint")
-            yield Select([], id="fast-model", prompt="same as the report model")
+                yield Label("reading model", classes="field-label")
+                yield Static("reads every page — speed decides the length of a run", classes="hint")
+                yield Select([], id="fast-model", prompt="same as the report model")
 
-            with Horizontal(classes="row"):
-                with Vertical(classes="half"):
-                    yield Label("parallel readers", classes="field-label")
-                    yield Input(str(self.config.model.parallel), id="parallel", type="integer")
-                with Vertical(classes="half"):
-                    yield Label("searxng", classes="field-label")
-                    yield Select(
-                        [
-                            ("start and stop per run", "ephemeral"),
-                            ("keep it warm", "warm"),
-                            ("I run my own", "external"),
-                        ],
-                        id="searxng-mode",
-                        value=self.config.search.mode,
-                        allow_blank=False,
-                    )
+                with Horizontal(classes="row"):
+                    with Vertical(classes="half"):
+                        yield Label("parallel readers", classes="field-label")
+                        yield Input(str(self.config.model.parallel), id="parallel", type="integer")
+                    with Vertical(classes="half"):
+                        yield Label("searxng", classes="field-label")
+                        yield Select(
+                            [
+                                ("start and stop per run", "ephemeral"),
+                                ("keep it warm", "warm"),
+                                ("I run my own", "external"),
+                            ],
+                            id="searxng-mode",
+                            value=self.config.search.mode,
+                            allow_blank=False,
+                        )
 
-            with Horizontal(classes="row"):
+            with Horizontal(id="modal-footer"):
                 yield Button("save", id="save", variant="primary")
                 yield Button("rescan", id="rescan")
                 yield Button("cancel", id="cancel")
+                yield Static("  [dim]ctrl+s save · esc cancel[/dim]", classes="keys")
 
     def on_mount(self) -> None:
-        self.fill(rescan=False)
+        # Detection may still have been running when this screen opened; an
+        # empty list would otherwise claim there is no server on a machine
+        # that has one.
+        self.fill(rescan=not self.servers)
 
     def fill(self, rescan: bool = True) -> None:
         if rescan:
@@ -188,6 +223,9 @@ class ModelsScreen(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         self.dismiss("")
+
+    def action_save(self) -> None:
+        self.dismiss(self.save())
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "rescan":
@@ -249,11 +287,12 @@ class RunsScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal"):
-            yield Label("runs", classes="modal-title")
+            yield Static(f"{MASCOT}  [b]runs[/b]", classes="modal-title")
             with VerticalScroll(id="run-list"):
                 yield Static(id="run-table")
-            yield Static("[dim]press 1-9 to replay one, esc to close[/dim]", classes="hint")
-            yield Button("close", id="close")
+            with Horizontal(id="modal-footer"):
+                yield Button("close", id="close")
+                yield Static("  [dim]1-9 replay · esc close[/dim]", classes="keys")
 
     def on_mount(self) -> None:
         self.entries = self.find_runs()
@@ -307,22 +346,28 @@ class Console(App):
     Screen { background: $surface; }
     #banner { height: auto; padding: 1 2 0 2; color: $accent; }
     #transcript { padding: 0 2; background: $surface; border: none; }
-    #live { height: auto; padding: 0 2; display: none; }
+    #live { height: auto; margin: 0 2; padding: 0 1; display: none;
+            border: round $primary 40%; }
     #live.running { display: block; }
-    #prompt-row { height: 3; padding: 0 1; }
-    #command { border: tall $primary 40%; }
-    #command:focus { border: tall $accent; }
-    #statusbar { height: 1; padding: 0 2; background: $panel; }
+    #prompt-row { height: 3; padding: 0 2; }
+    #command { border: round $primary 40%; background: $surface; }
+    #command:focus { border: round $accent; }
+    #statusbar { height: 1; padding: 0 3; background: $panel; }
 
-    #modal { width: 80; height: auto; max-height: 90%; padding: 1 2;
+    /* A fixed height with a scrolling body is what keeps the footer on
+       screen. With height:auto the buttons were laid out past the bottom. */
+    #modal { width: 82; height: 90%; max-height: 34; padding: 1 2;
              background: $panel; border: round $accent; }
-    .modal-title { color: $accent; text-style: bold; }
+    #modal-body { height: 1fr; }
+    #modal-footer { height: 3; margin: 1 0 0 0; align-vertical: middle; }
+    #modal-footer Button { margin: 0 2 0 0; min-width: 10; }
+    .keys { width: 1fr; height: 3; content-align: right middle; }
+    .modal-title { color: $accent; margin: 0 0 1 0; }
     .field-label { color: $accent; margin: 1 0 0 0; }
     .hint { color: $text-muted; }
     .row { height: auto; margin: 1 0 0 0; }
-    .row Button { margin: 0 2 0 0; }
     .half { width: 1fr; padding: 0 1 0 0; }
-    #run-list { height: auto; max-height: 18; }
+    #run-list { height: 1fr; }
     ModelsScreen, RunsScreen { align: center middle; }
     """
 
@@ -341,7 +386,7 @@ class Console(App):
         self.offset = 0
         self.tick = 0
         self.busy = False
-        self.engine = "checking…"
+        self.engine = ""
 
     # ------------------------------------------------------------- layout --
 
@@ -354,17 +399,27 @@ class Console(App):
         yield Static(id="statusbar", markup=True)
 
     def on_mount(self) -> None:
+        # Held rather than looked up: App.query_one searches the active screen,
+        # so once a modal is open the main screen's widgets are not reachable
+        # and the timer below would raise eight times a second.
+        self.transcript = self.query_one("#transcript", RichLog)
+        self.statusbar = self.query_one("#statusbar", Static)
+        self.livepanel = self.query_one("#live", Static)
+
         self.say(HELP)
         self.query_one("#command", Input).focus()
         self.set_interval(1 / 8, self.pump)
-        self.probe_environment()
+        # Probing means four HTTP calls with timeouts; skip it when the caller
+        # already knows what is running.
+        if not self.servers:
+            self.probe_environment()
         if self.watching:
             self.attach(self.watching)
 
     # ------------------------------------------------------------ plumbing --
 
     def say(self, markup) -> None:
-        self.query_one("#transcript", RichLog).write(markup)
+        self.transcript.write(markup)
 
     def stamp(self, glyph: str, text: str, tone: str = "white") -> None:
         now = datetime.now().strftime("%H:%M:%S")
@@ -388,20 +443,67 @@ class Console(App):
             self.stamp("!", "no local model server — start LM Studio or Ollama", "yellow")
         self.stamp("●", f"search engine: {engine}", "green" if "no " not in engine else "yellow")
 
+    def mood(self) -> tuple[str, str]:
+        """Which face to wear: the stage in flight, or how the run ended."""
+        if self.busy:
+            for name in reversed(self.state.stage_order):
+                if self.state.stages[name].status == "run":
+                    return MOODS.get(name, MOODS["idle"])
+            return MOODS["idle"]
+        if self.state.finished:
+            return MOODS["done" if self.state.status == "ok" else "fail"]
+        return MOODS["idle"]
+
     def status_line(self) -> str:
+        """State only -- how to use the thing is in the banner.
+
+        Built most-important-first and cut to fit, so a narrow terminal still
+        shows the face, the model, and how the run is going.
+        """
+        room = max(24, self.size.width - 4)
+        gap = 5  # the "  ·  " between segments
+        face, tone = self.mood()
         model = self.config.model.name or "auto"
         reading = self.config.model.fast_name
-        parts = [f"[cyan]{model}[/cyan]"]
+        saved = self.state.metrics.get("tokens_saved")
+
+        saved_text = _fmt_count(saved) if saved else ""
+        elapsed_text = _fmt_elapsed(self.state.elapsed) if self.busy else ""
+
+        # The model name takes whatever is left after the pieces that must be
+        # there, rather than squeezing the elapsed time off the end.
+        fixed = len(face)
+        if saved_text:
+            fixed += gap + len(saved_text) + 6
+        if elapsed_text:
+            fixed += gap + len(elapsed_text)
+        name = _short_model(model, max(8, min(22, room - fixed - gap)))
+
+        segments: list[tuple[str, int]] = [
+            (f"[{tone}]{face}[/{tone}]", len(face)),
+            (f"[cyan]{name}[/cyan]", len(name)),
+        ]
+        if saved_text:
+            segments.append((f"[dim]saved[/dim] [green]{saved_text}[/green]", len(saved_text) + 6))
+        if elapsed_text:
+            segments.append((f"[white]{elapsed_text}[/white]", len(elapsed_text)))
+
+        # Dropped, last first, until the line fits.
         if reading and reading != model:
-            parts.append(f"read [cyan]{reading}[/cyan]")
-        parts.append(f"[dim]{self.engine}[/dim]")
-        if self.busy:
-            saved = self.state.metrics.get("tokens_saved")
-            if saved:
-                parts.append(f"saved [green]{_fmt_count(saved)}[/green]")
-            parts.append(f"[white]{_fmt_elapsed(self.state.elapsed)}[/white]")
-        parts.append("[dim]/help · ctrl+c quit[/dim]")
-        return "   ".join(parts)
+            short = _short_model(reading)
+            segments.append((f"[dim]read[/dim] [cyan]{short}[/cyan]", len(short) + 5))
+        if self.engine:
+            segments.append((f"[dim]{self.engine}[/dim]", len(self.engine)))
+
+        chosen: list[str] = []
+        used = 0
+        for index, (markup, width) in enumerate(segments):
+            cost = width + (gap if index else 0)
+            if index >= 2 and used + cost > room:
+                continue
+            chosen.append(markup)
+            used += cost
+        return "  [grey30]·[/grey30]  ".join(chosen)
 
     # ------------------------------------------------------------ the loop --
 
@@ -409,9 +511,9 @@ class Console(App):
         self.tick += 1
         if self.watching:
             self.drain()
-        self.query_one("#statusbar", Static).update(self.status_line())
+        self.statusbar.update(self.status_line())
         if self.busy:
-            self.query_one("#live", Static).update(self.live_panel())
+            self.livepanel.update(self.live_panel())
 
     def drain(self) -> None:
         """Read new events and turn them into transcript lines."""
@@ -455,7 +557,7 @@ class Console(App):
             self.stamp(glyph, f"[{tone}]{event.get('text','')}[/{tone}]", tone)
         elif kind == "end":
             self.busy = False
-            self.query_one("#live").set_class(False, "running")
+            self.livepanel.set_class(False, "running")
             if event.get("status") == "ok":
                 self.stamp("◆", f"[b green]done[/b green]  {event.get('summary','')}", "green")
                 if event.get("report"):
@@ -617,7 +719,7 @@ class Console(App):
 
         writer = RunWriter(self.config.runs_path, new_run_id(brief.topic))
         self.busy = True
-        self.query_one("#live").set_class(True, "running")
+        self.livepanel.set_class(True, "running")
         self.attach(writer.dir)
         self.stamp("●", f"{origin} · {len(brief.queries)} queries · effort [b]{effort}[/b]", "cyan")
 
@@ -633,7 +735,7 @@ class Console(App):
     # ------------------------------------------------------------ actions --
 
     def action_clear(self) -> None:
-        self.query_one("#transcript", RichLog).clear()
+        self.transcript.clear()
 
     def action_help(self) -> None:
         self.say(HELP)

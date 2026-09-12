@@ -129,8 +129,11 @@ there; the transcript fills in as it happens rather than arriving at the end.
 ┌────────────────────────────────────────────────────────────────────────┐
 │ sqlite wal mode concurrency --low                                      │
 └────────────────────────────────────────────────────────────────────────┘
- gemma-4-e4b   read minicpm5-2b   docker in WSL   saved 17k   2:41   /help
+ (◉ᴗ◉) · gemma-4-e4b · read minicpm5-2b · docker in WSL · saved 17k · 2:41
 ```
+
+The face on the status bar follows the stage in flight — searching, reading,
+arguing, writing — so a long run looks alive rather than hung.
 
 | | |
 |---|---|
@@ -142,6 +145,9 @@ there; the transcript fills in as it happens rather than arriving at the end.
 | `/template` | print a brief skeleton |
 | `/stop` | stop the SearXNG container |
 | `/clear` `/help` `/quit` | |
+
+Inside `/models`: `ctrl+s` saves, `esc` cancels. Inside `/runs`: `1`-`9` replays
+a run, `esc` closes.
 
 `/models` lists every chat model on every local server it can find — LM Studio,
 Ollama, llama.cpp, vLLM — and the two roles can live on different servers: the
