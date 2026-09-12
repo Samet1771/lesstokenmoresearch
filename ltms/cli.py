@@ -3,6 +3,7 @@
     ltms brief.md         run research from a brief you wrote
     ltms "topic"          quick one-off, queries expanded from the topic
     ltms template         print a brief skeleton to fill in
+    ltms gui              the window: pick models, watch runs
     ltms init             interactive setup
     ltms watch [run]      attach the dashboard to a run
     ltms runs             list recent runs
@@ -30,7 +31,7 @@ from . import docker_mgr, ui, window
 from .pipeline import EFFORTS, run_sync
 from .runs import RunWriter, load_state, new_run_id, resolve_run
 
-SUBCOMMANDS = {"init", "watch", "runs", "stop", "status", "template", "help"}
+SUBCOMMANDS = {"init", "gui", "watch", "runs", "stop", "status", "template", "help"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -113,6 +114,17 @@ def cmd_research(args: argparse.Namespace, console: Console) -> int:
             f" · {result.get('sources_file', '')}"
         )
     return 0
+
+
+def cmd_gui(args: list[str], console: Console) -> int:
+    from .gui import launch  # imported lazily: textual is slow to load
+
+    config = config_mod.load()
+    target = None
+    if args:
+        candidate = Path(args[0])
+        target = candidate if candidate.exists() else resolve_run(config.runs_path, args[0])
+    return launch(target)
 
 
 def cmd_template(console: Console) -> int:
@@ -249,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_status(console)
         if command == "template":
             return cmd_template(console)
+        if command == "gui":
+            return cmd_gui(rest, console)
 
     args = build_parser().parse_args(argv)
     return cmd_research(args, console)

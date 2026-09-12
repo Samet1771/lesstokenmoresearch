@@ -29,7 +29,7 @@ LINUX_TERMINALS = [
 
 
 def _watch_command(run_dir: Path) -> list[str]:
-    return [sys.executable, "-m", "ltms", "watch", str(run_dir)]
+    return [sys.executable, "-m", "ltms", "gui", str(run_dir)]
 
 
 def _spawn_windows(run_dir: Path) -> bool:
@@ -42,7 +42,7 @@ def _spawn_windows(run_dir: Path) -> bool:
             [
                 "@echo off",
                 f"title {TITLE}",
-                f'"{sys.executable}" -m ltms watch "{run_dir}"',
+                f'"{sys.executable}" -m ltms gui "{run_dir}"',
             ]
         )
         + "\r\n",

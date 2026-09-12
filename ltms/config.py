@@ -70,6 +70,11 @@ class ModelConfig:
     # hour; planning and the final report are a handful of calls where quality
     # shows. Leave this empty to use `name` for everything.
     fast_name: str = ""
+    # The reading model may live on a different server -- a small model in
+    # Ollama while the big one stays loaded in LM Studio, say. Empty means "the
+    # same server as the report model".
+    fast_provider: str = ""
+    fast_base_url: str = ""
     # How many extractor agents run at once. Should not exceed the server's
     # own parallelism (Ollama: OLLAMA_NUM_PARALLEL) or requests just queue.
     parallel: int = 4
@@ -79,7 +84,12 @@ class ModelConfig:
         """role: 'fast' for bulk extraction, anything else for reasoning work."""
         if role != "fast" or not self.fast_name:
             return self
-        return replace(self, name=self.fast_name)
+        return replace(
+            self,
+            name=self.fast_name,
+            provider=self.fast_provider or self.provider,
+            base_url=self.fast_base_url or self.base_url,
+        )
 
 
 @dataclass

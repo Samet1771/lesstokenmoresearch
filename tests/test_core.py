@@ -4,6 +4,9 @@ import textwrap
 import unittest
 
 from ltms.brief import BriefError, from_topic, parse
+from ltms.config import ModelConfig
+from ltms.gui import _decode, _match, _model_options
+from ltms.llm import DetectedServer
 from ltms.llm import is_embedding_model, parse_json_list, strip_thinking
 from ltms.pipeline import EFFORTS
 from ltms.runs import RunState
@@ -198,3 +201,57 @@ class ModelSelection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuiModelPicking(unittest.TestCase):
+    """The pure helpers behind the two model dropdowns."""
+
+    SERVERS = [
+        DetectedServer("LM Studio", "openai-compatible", "http://127.0.0.1:1234/v1",
+                       ["qwen3-27b", "gemma-4-e4b", "text-embedding-nomic-embed-text-v1.5"]),
+        DetectedServer("Ollama", "ollama", "http://127.0.0.1:11434", ["qwen3:4b"]),
+    ]
+
+    def test_lists_chat_models_from_every_server(self):
+        options = _model_options(self.SERVERS)
+        self.assertEqual(len(options), 3)
+        self.assertIn("(LM Studio)", options[0][0])
+        self.assertIn("(Ollama)", options[2][0])
+
+    def test_hides_embedding_models(self):
+        labels = " ".join(label for label, _ in _model_options(self.SERVERS))
+        self.assertNotIn("embedding", labels)
+
+    def test_round_trips_a_choice(self):
+        _, value = _model_options(self.SERVERS)[2]
+        self.assertEqual(_decode(value), (1, "qwen3:4b"))
+
+    def test_decodes_nothing_selected(self):
+        for value in ["Select.BLANK", "Select.NULL", "", None, "no-separator"]:
+            self.assertIsNone(_decode(value), repr(value))
+
+    def test_finds_the_saved_choice_again(self):
+        self.assertEqual(_match(self.SERVERS, "http://127.0.0.1:11434", "qwen3:4b"), "1::qwen3:4b")
+        self.assertIsNone(_match(self.SERVERS, "http://127.0.0.1:11434", "not-loaded"))
+        self.assertIsNone(_match(self.SERVERS, "", ""))
+
+
+class ModelRoles(unittest.TestCase):
+    def test_reading_model_can_live_on_another_server(self):
+        config = ModelConfig(
+            provider="openai-compatible", base_url="http://127.0.0.1:1234/v1", name="big",
+            fast_name="small", fast_provider="ollama", fast_base_url="http://127.0.0.1:11434",
+        )
+        fast = config.for_role("fast")
+        self.assertEqual((fast.name, fast.provider, fast.base_url),
+                         ("small", "ollama", "http://127.0.0.1:11434"))
+        report = config.for_role("report")
+        self.assertEqual((report.name, report.base_url), ("big", "http://127.0.0.1:1234/v1"))
+
+    def test_without_an_override_both_roles_share_the_server(self):
+        config = ModelConfig(base_url="http://x/v1", name="big", fast_name="small")
+        self.assertEqual(config.for_role("fast").base_url, "http://x/v1")
+
+    def test_no_fast_model_means_one_model_for_everything(self):
+        config = ModelConfig(name="only")
+        self.assertEqual(config.for_role("fast").name, "only")

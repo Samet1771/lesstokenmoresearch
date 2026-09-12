@@ -72,8 +72,31 @@ For a quick one-off, `ltms "some topic"` expands the topic along a few plain
 angles instead — no model, no guessing, and reliably worse than queries you
 write yourself.
 
-While it runs, a small dashboard window shows the agents working. The research
-never depends on that window being open.
+## The window
+
+```bash
+ltms gui
+```
+
+Two tabs. **models** lists every chat model on every local server it can find —
+LM Studio, Ollama, llama.cpp, vLLM — and lets you pick two:
+
+- **report model** — writes the findings; quality shows here
+- **reading model** — reads every fetched page; throughput decides whether a
+  run takes three minutes or an hour
+
+The two can live on different servers: the big one loaded in LM Studio, a small
+fast one in Ollama. They never run at the same time, so both do not have to fit
+in VRAM together. Embedding and reranker models are filtered out of the lists,
+because picking one produces a baffling failure.
+
+**runs** lists past and running research and shows the live dashboard —
+which stage is going, which page each reader has open, how many tokens have
+been kept out of the calling agent's context.
+
+The same window opens by itself when an agent starts a run. It is a separate
+read-only process: if it fails to open, or you close it, the research carries
+on. `ltms watch` is the lighter, non-interactive version of the same view.
 
 ## Status
 
@@ -143,8 +166,9 @@ For web research, do not fetch pages yourself. Instead:
 | `ltms brief.md` | run research from a brief |
 | `ltms "topic"` | quick one-off research |
 | `ltms template` | print a brief skeleton |
-| `ltms init` | interactive setup |
-| `ltms watch [run]` | attach the dashboard to a run |
+| `ltms gui` | the window: pick models, watch runs |
+| `ltms init` | interactive setup from the terminal |
+| `ltms watch [run]` | attach the plain dashboard to a run |
 | `ltms runs` | list recent runs |
 | `ltms status` | show config and what is reachable |
 | `ltms stop` | stop the managed SearXNG container |
@@ -165,6 +189,8 @@ provider = "openai-compatible"        # or "ollama"
 base_url = "http://127.0.0.1:1234/v1" # LM Studio's default
 name = ""                             # blank = whatever the server has loaded
 fast_name = ""                        # optional: small model for the reading pass
+fast_provider = ""                    # optional: reading model on another server
+fast_base_url = ""
 parallel = 4
 
 [ui]
