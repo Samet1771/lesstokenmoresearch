@@ -11,9 +11,10 @@ import httpx
 
 import ltms.fetch
 from ltms.fetch import (
-    MAX_RETRY_WAIT, MIN_USEFUL_CHARS, FetchStats, Page,
-    fetch_many, html_to_text, retry_delay, tidy,
+    MAX_RETRY_WAIT, MIN_USEFUL_CHARS, FetchStats, Page, feed_to_text,
+    fetch_many, fetch_url_for, html_to_text, looks_like_feed, retry_delay, tidy,
 )
+from ltms.search.base import SearchResult, dedupe_and_cap
 from ltms.report import ROLES, numbered_evidence, fallback_report
 
 
@@ -268,9 +269,6 @@ class Evidence(unittest.TestCase):
         self.assertEqual(len({role.id for role in ROLES}), len(ROLES))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ReportDestination(unittest.TestCase):
     """Where a report lands depends on who asked for it."""
@@ -322,3 +320,105 @@ class ReportDestination(unittest.TestCase):
 
         self.assertEqual(str(Config(reports_dir="/tmp/elsewhere").reports_path).replace("\\", "/"),
                          "/tmp/elsewhere")
+
+class RedditIsReadable(unittest.TestCase):
+    """Reddit's HTML is a JavaScript shell on every subdomain, and its .json
+    endpoint answers 403 to every user agent. The Atom feed is the way in."""
+
+    def test_a_thread_is_asked_for_as_a_feed(self):
+        self.assertEqual(
+            fetch_url_for("https://www.reddit.com/r/buildapc/comments/abc/should_i/"),
+            "https://www.reddit.com/r/buildapc/comments/abc/should_i/.rss",
+        )
+
+    def test_old_and_bare_reddit_are_normalised_to_www(self):
+        # old.reddit serves its shell whatever suffix you ask for; only www
+        # publishes the feed.
+        for url in ("https://old.reddit.com/r/x/comments/abc/",
+                    "https://reddit.com/r/x/comments/abc/",
+                    "https://new.reddit.com/r/x/comments/abc/"):
+            self.assertEqual(fetch_url_for(url), "https://www.reddit.com/r/x/comments/abc/.rss", url)
+
+    def test_tracking_parameters_do_not_reach_the_feed(self):
+        self.assertEqual(
+            fetch_url_for("https://www.reddit.com/r/x/comments/abc/?utm_source=share#c1"),
+            "https://www.reddit.com/r/x/comments/abc/.rss",
+        )
+
+    def test_asking_twice_does_not_double_the_suffix(self):
+        once = fetch_url_for("https://www.reddit.com/r/x/comments/abc/")
+        self.assertEqual(fetch_url_for(once), once)
+
+    def test_everything_else_is_left_exactly_as_it_is(self):
+        for url in ("https://example.com/page", "https://sqlite.org/wal.html",
+                    "https://reddithelp.com/r/x"):
+            self.assertEqual(fetch_url_for(url), url, url)
+
+
+class FeedText(unittest.TestCase):
+    FEED = """<?xml version="1.0" encoding="UTF-8"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <title>Should I buy an OLED?</title>
+        <entry><title>post</title>
+          <content type="html">&amp;lt;p&amp;gt;Burn in is still a thing on OLED panels.&amp;lt;/p&amp;gt;</content>
+        </entry>
+        <entry><title>comment</title>
+          <content type="html">&amp;lt;p&amp;gt;I have used mine for three years with no burn in.&amp;lt;/p&amp;gt;</content>
+        </entry>
+      </feed>"""
+
+    def test_the_post_and_every_comment_come_through(self):
+        title, text = feed_to_text(self.FEED)
+        self.assertEqual(title, "Should I buy an OLED?")
+        self.assertIn("Burn in is still a thing", text)
+        self.assertIn("three years with no burn in", text)
+
+    def test_the_double_escaping_is_undone(self):
+        _, text = feed_to_text(self.FEED)
+        self.assertNotIn("&lt;", text)
+        self.assertNotIn("<p>", text)
+
+    def test_a_feed_is_recognised_without_a_content_type(self):
+        self.assertTrue(looks_like_feed(self.FEED.encode(), "text/plain"))
+        self.assertTrue(looks_like_feed(b"<html><body>hi", "application/atom+xml"))
+        self.assertFalse(looks_like_feed(b"<!DOCTYPE html><html>", "text/html"))
+
+
+class RateLimitWait(unittest.TestCase):
+    def test_reddits_own_header_is_read_when_retry_after_is_missing(self):
+        # Measured on reddit: no Retry-After at all, x-ratelimit-reset of 21-54.
+        response = httpx.Response(429, headers={"x-ratelimit-reset": "24"})
+        self.assertEqual(retry_delay(response), 24.0)
+
+    def test_retry_after_still_wins_when_both_are_sent(self):
+        response = httpx.Response(429, headers={"retry-after": "5", "x-ratelimit-reset": "40"})
+        self.assertEqual(retry_delay(response), 5.0)
+
+
+class StrictHosts(unittest.TestCase):
+    def test_reddit_is_capped_at_one_page_however_many_it_offers(self):
+        results = [
+            SearchResult(title=f"mechanical keyboard thread {i}",
+                         url=f"https://www.reddit.com/r/kb/comments/{i}/x/",
+                         score=1.0 - i / 100, query="mechanical keyboard advice")
+            for i in range(6)
+        ]
+        outcome = dedupe_and_cap(results, limit=20, per_domain=3)
+        self.assertEqual(len(outcome.results), 1)
+
+    def test_a_thin_search_does_not_top_up_from_a_strict_host(self):
+        results = [
+            SearchResult(title=f"mechanical keyboard thread {i}",
+                         url=f"https://www.reddit.com/r/kb/comments/{i}/x/",
+                         score=0.9, query="mechanical keyboard advice")
+            for i in range(6)
+        ] + [
+            SearchResult(title="mechanical keyboard review", url="https://blog.test/kb",
+                         score=1.0, query="mechanical keyboard advice")
+        ]
+        outcome = dedupe_and_cap(results, limit=20, per_domain=3)
+        self.assertEqual(sorted(r.domain for r in outcome.results), ["blog.test", "reddit.com"])
+
+
+if __name__ == "__main__":
+    unittest.main()

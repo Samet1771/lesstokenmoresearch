@@ -29,10 +29,12 @@ MIN_USEFUL_CHARS = 400  # below this there is nothing to extract
 # several pages from the same documentation site, and hitting it with eight at
 # once is how a run earns its own 429.
 PER_HOST_GAP = 0.7
-# 429 and 503 usually come with Retry-After. Waiting the asked-for time gets
-# the page; ignoring it gets a longer ban. Anything beyond this is not worth
-# holding a run for.
-MAX_RETRY_WAIT = 12.0
+# 429 and 503 come with Retry-After, or with Reddit's own x-ratelimit-reset.
+# Waiting the asked-for time gets the page; ignoring it gets a longer ban.
+# Measured on Reddit: no Retry-After at all, and resets of 21 to 54 seconds.
+# Long, but the wait happens on that host's own lock while every other site in
+# the run keeps moving, so it costs one page's latency rather than the run's.
+MAX_RETRY_WAIT = 30.0
 
 WHITESPACE = re.compile(r"[ \t ]+")
 BLANK_LINES = re.compile(r"\n{3,}")
@@ -59,10 +61,11 @@ class Page:
     url: str
     title: str = ""
     text: str = ""
-    kind: str = "html"  # html | pdf
+    kind: str = "html"  # html | pdf | feed
     chars: int = 0
     error: str = ""
     blocked: bool = False
+    retry_after: float = 0.0
 
     @property
     def usable(self) -> bool:
@@ -145,6 +148,61 @@ def _strip_tags(html: str) -> tuple[str, str]:
     return title, tidy(body)
 
 
+# Reddit serves every thread as a JavaScript shell -- 320 KB of markup holding
+# "Welcome to Reddit. Skip to main content" and nothing else, on www and on
+# old.reddit alike. The .json endpoint answers 403 to every user agent tried.
+# But the thread is still published as an Atom feed, post and comments both,
+# and that is a door Reddit deliberately leaves open.
+REDDIT_PAGE = re.compile(r"^https?://(?:[\w-]+\.)?reddit\.com/r/[^/]+", re.I)
+
+# The entries of an Atom feed, and what an Atom feed looks like from outside.
+FEED_ENTRY = re.compile(r"<content[^>]*>(.*?)</content>", re.S | re.I)
+FEED_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
+FEED_TYPES = ("atom+xml", "rss+xml", "application/xml", "text/xml")
+
+
+def fetch_url_for(url: str) -> str:
+    """The address to actually request, which is not always the one cited.
+
+    The host is normalised to www along the way: old.reddit.com serves its
+    JavaScript shell whatever suffix you ask it for, and only www publishes
+    the feed.
+    """
+    match = REDDIT_PAGE.match(url)
+    if not match:
+        return url
+    path = url.split("?")[0].split("#")[0].rstrip("/")
+    path = path[path.index("/r/") :]
+    return f"https://www.reddit.com{path}" + ("" if path.endswith(".rss") else "/.rss")
+
+
+def feed_to_text(xml: str) -> tuple[str, str]:
+    """An Atom or RSS feed as plain text: the title, then every entry.
+
+    Feed content is HTML escaped inside XML, and Reddit escapes it twice, so
+    the entities have to come off in two passes before the tags can be stripped.
+    """
+    import html as html_module
+
+    titles = FEED_TITLE.findall(xml)
+    title = tidy(re.sub(r"<[^>]+>", " ", html_module.unescape(titles[0]))) if titles else ""
+
+    parts: list[str] = []
+    for raw in FEED_ENTRY.findall(xml):
+        unescaped = html_module.unescape(html_module.unescape(raw))
+        _, text = _strip_tags(unescaped)
+        if text:
+            parts.append(text)
+    return title, tidy("\n\n".join(parts))
+
+
+def looks_like_feed(payload: bytes, content_type: str) -> bool:
+    if any(kind in content_type for kind in FEED_TYPES):
+        return True
+    head = payload[:400].lstrip().lower()
+    return head.startswith(b"<?xml") and (b"<feed" in head or b"<rss" in head)
+
+
 def pdf_to_text(payload: bytes) -> tuple[str, str]:
     try:
         from pypdf import PdfReader
@@ -162,8 +220,15 @@ def pdf_to_text(payload: bytes) -> tuple[str, str]:
 
 
 def retry_delay(response: httpx.Response) -> float:
-    """How long the server asked us to wait, clamped to something bearable."""
+    """How long the server asked us to wait, clamped to something bearable.
+
+    Retry-After is the standard answer. Reddit does not send it and instead
+    reports x-ratelimit-reset, so read that too rather than guessing two
+    seconds and being refused again.
+    """
     raw = (response.headers.get("retry-after") or "").strip()
+    if not raw:
+        raw = (response.headers.get("x-ratelimit-reset") or "").strip()
     try:
         wait = float(raw)
     except ValueError:
@@ -173,16 +238,14 @@ def retry_delay(response: httpx.Response) -> float:
 
 async def fetch_one(client: httpx.AsyncClient, url: str) -> Page:
     page = Page(url=url)
+    target = fetch_url_for(url)
     try:
-        response = await client.get(url)
-        # 429 and 503 are "not now", not "no". The server usually says how long
-        # to wait; one patient retry costs a few seconds and often gets a page
-        # that would otherwise be written off.
+        response = await client.get(target)
+        # 429 and 503 are "not now", not "no". Report how long the server asked
+        # for and let the caller wait outside its concurrency slot, so one
+        # rate-limited host does not stall the fetches that could be running.
         if response.status_code in (429, 503):
-            wait = retry_delay(response)
-            if wait <= MAX_RETRY_WAIT:
-                await asyncio.sleep(wait)
-                response = await client.get(url)
+            page.retry_after = retry_delay(response)
     except httpx.HTTPError as error:
         page.error = f"{type(error).__name__}"
         return page
@@ -199,7 +262,10 @@ async def fetch_one(client: httpx.AsyncClient, url: str) -> Page:
     content_type = response.headers.get("content-type", "").lower()
     payload = response.content[:MAX_BYTES]
 
-    if "pdf" in content_type or url.lower().endswith(".pdf") or payload[:4] == b"%PDF":
+    if looks_like_feed(payload, content_type):
+        page.kind = "feed"
+        title, text = feed_to_text(payload.decode(response.encoding or "utf-8", errors="replace"))
+    elif "pdf" in content_type or url.lower().endswith(".pdf") or payload[:4] == b"%PDF":
         page.kind = "pdf"
         title, text = pdf_to_text(payload)
         if text.startswith("pdf: "):
@@ -252,18 +318,30 @@ async def fetch_many(
         http2=True,
     ) as client:
 
+        async def attempt(index: int, url: str, announce: bool) -> Page:
+            async with gate:
+                if announce and on_start:
+                    on_start(index, url)
+                try:
+                    return await fetch_one(client, url)
+                except Exception as error:  # noqa: BLE001 - never kill the batch
+                    return Page(url=url, error=type(error).__name__)
+
         async def one(index: int, url: str) -> None:
             lock = hosts.setdefault(host_of(url), asyncio.Lock())
             async with lock:
-                async with gate:
-                    if on_start:
-                        on_start(index, url)
-                    try:
-                        pages[index] = await fetch_one(client, url)
-                    except Exception as error:  # noqa: BLE001 - never kill the batch
-                        pages[index] = Page(url=url, error=type(error).__name__)
-                    if on_done:
-                        on_done(index, pages[index])
+                page = await attempt(index, url, announce=True)
+                # "Not now" rather than "no". The wait happens outside the
+                # concurrency slot: this host is asleep on its own lock while
+                # every other site in the run carries on.
+                if page.retry_after:
+                    await asyncio.sleep(page.retry_after)
+                    page = await attempt(index, url, announce=False)
+                if page.retry_after and not page.error:
+                    page.error = "rate limited"
+                pages[index] = page
+                if on_done:
+                    on_done(index, page)
                 # The host lock is held a moment longer, but the global slot is
                 # already free: other sites keep moving while this one rests.
                 await asyncio.sleep(PER_HOST_GAP)

@@ -374,8 +374,8 @@ letting those pages cost anything:
   the top N and accepting what survives turned "read 30 pages" into 18 read; a
   measured run now fetches 14 to read 10.
 - **Hosts that are never readable are dropped before the fetch.** YouTube,
-  Instagram, Reddit, Spotify and friends return a JavaScript shell — measured
-  at 6 to 400 characters. They cost a fetch and a reading slot for nothing.
+  Instagram, Spotify and friends return a JavaScript shell — measured at 6 to
+  400 characters. They cost a fetch and a reading slot for nothing.
 - **A page trafilatura cannot parse is not thrown away.** When the careful
   extractor finds nothing, a plain tag strip runs instead: 9 of 30 otherwise
   empty pages came back usable.
@@ -389,6 +389,29 @@ letting those pages cost anything:
 
 A blocked page is reported as `anti-bot challenge` rather than `http 403`, so
 the run log says what actually happened.
+
+### Reddit
+
+Reddit is often the only place a question has been answered by people who
+actually did the thing, so it is worth the trouble.
+
+Its HTML is a JavaScript shell on every subdomain — 320 KB of markup holding
+"Welcome to Reddit. Skip to main content", on `old.reddit.com` too. The `.json`
+endpoint answers 403 to every user agent tried, Reddit's documented format
+included.
+
+The Atom feed still works, and it is the better source anyway: a thread's
+`.rss` returns the post and its comments as text, which is the part of Reddit
+worth reading. ltms rewrites any Reddit URL to that feed and normalises the
+host to `www` on the way, because `old.reddit.com` serves its shell whatever
+suffix you ask it for.
+
+Reddit then rate-limits an unauthenticated reader hard, and sends no
+`Retry-After` — it reports `x-ratelimit-reset` instead, measured at 21 to 54
+seconds. So ltms reads its own header, waits outside the concurrency slot so
+other sites keep moving, and caps Reddit at **one thread per run**: a second
+thread inside the minute is refused, while one comes back in two seconds with
+26,000 characters of discussion.
 
 Archive.org was measured as a fallback for blocked pages and did not earn its
 place: of 10 blocked URLs, 2 had a usable snapshot.

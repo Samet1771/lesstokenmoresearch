@@ -38,10 +38,26 @@ NOISE_DOMAINS = {
     "x.com",
     "twitter.com",
     "linkedin.com",
-    "reddit.com",  # old.reddit is blocked too; measured 39 characters
     "spotify.com",
     "music.apple.com",
 }
+
+
+# Hosts worth reading, one page at a time. Reddit publishes every thread as an
+# Atom feed -- the post and its comments, which is the part worth having -- and
+# then rate-limits an unauthenticated reader hard. Measured: a second thread
+# within the minute is refused, and even a ten-second gap gave three refusals
+# in four requests, while a single thread comes back in two seconds. One good
+# thread beats three refusals, so the domain cap for these is one and the
+# relaxation that tops up a thin search does not apply to them.
+STRICT_DOMAINS = {"reddit.com": 1}
+
+
+def cap_for(domain: str, default: int) -> int:
+    for host, limit in STRICT_DOMAINS.items():
+        if domain == host or domain.endswith("." + host):
+            return limit
+    return default
 
 
 # SearXNG's `it` category is stackoverflow, github, MDN, docker hub and friends.
@@ -234,7 +250,7 @@ def dedupe_and_cap(
     overflow: list[SearchResult] = []
     for result in ordered:
         count = per_domain_count.get(result.domain, 0)
-        if count >= per_domain:
+        if count >= cap_for(result.domain, per_domain):
             overflow.append(result)
             continue
         per_domain_count[result.domain] = count + 1
@@ -251,7 +267,10 @@ def dedupe_and_cap(
         for result in overflow:
             if len(readmitted) >= needed:
                 break
-            if per_domain_count.get(result.domain, 0) >= per_domain * 2:
+            cap = cap_for(result.domain, per_domain)
+            # A strict host is strict because it refuses the second request,
+            # not because we wanted variety. Topping up from it wastes the slot.
+            if cap < per_domain or per_domain_count.get(result.domain, 0) >= cap * 2:
                 continue
             per_domain_count[result.domain] = per_domain_count.get(result.domain, 0) + 1
             readmitted.append(result)
