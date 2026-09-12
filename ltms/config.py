@@ -47,6 +47,49 @@ def config_path() -> Path:
     return config_dir() / "config.toml"
 
 
+def documents_dir() -> Path:
+    """The user's Documents folder, as the system actually defines it.
+
+    On Windows this is a shell known folder, not necessarily ~/Documents --
+    OneDrive backup moves it, and guessing lands reports somewhere the person
+    will never look.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            import ctypes.wintypes as wintypes
+
+            class _Guid(ctypes.Structure):
+                _fields_ = [
+                    ("d1", wintypes.DWORD),
+                    ("d2", wintypes.WORD),
+                    ("d3", wintypes.WORD),
+                    ("d4", ctypes.c_byte * 8),
+                ]
+
+            # FOLDERID_Documents
+            guid = _Guid(0xFDD39AD0, 0x238F, 0x46AF, (ctypes.c_byte * 8)(*b"\xad\xb4\x6c\x85\x48\x03\x69\xc7"))
+            buffer = ctypes.c_wchar_p()
+            if ctypes.windll.shell32.SHGetKnownFolderPath(
+                ctypes.byref(guid), 0, None, ctypes.byref(buffer)
+            ) == 0 and buffer.value:
+                return Path(buffer.value)
+        except Exception:  # noqa: BLE001 - any failure just means "guess"
+            pass
+    else:
+        # XDG records a translated or relocated Documents folder here.
+        user_dirs = Path.home() / ".config" / "user-dirs.dirs"
+        if user_dirs.exists():
+            try:
+                for line in user_dirs.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("XDG_DOCUMENTS_DIR="):
+                        value = line.split("=", 1)[1].strip().strip('"')
+                        return Path(value.replace("$HOME", str(Path.home())))
+            except OSError:
+                pass
+    return Path.home() / "Documents"
+
+
 @dataclass
 class SearchConfig:
     # ephemeral: start SearXNG per run, stop it afterwards
@@ -106,10 +149,17 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     runs_dir: str = ""
+    # Where reports land when a person asked for one. An agent names its own
+    # destination; a person should not have to go digging in an app folder.
+    reports_dir: str = ""
 
     @property
     def runs_path(self) -> Path:
         return Path(self.runs_dir).expanduser() if self.runs_dir else config_dir() / "runs"
+
+    @property
+    def reports_path(self) -> Path:
+        return Path(self.reports_dir).expanduser() if self.reports_dir else documents_dir() / "ltms"
 
 
 def _coerce(section_cls: Any, raw: dict[str, Any]) -> Any:
@@ -132,6 +182,7 @@ def load() -> Config:
         model=_coerce(ModelConfig, raw.get("model", {})),
         ui=_coerce(UiConfig, raw.get("ui", {})),
         runs_dir=raw.get("runs_dir", ""),
+        reports_dir=raw.get("reports_dir", ""),
     )
 
 
@@ -152,8 +203,11 @@ def save(config: Config) -> Path:
         "# Regenerate interactively with:  ltms init",
         "",
     ]
-    if config.runs_dir:
-        lines.append(f"runs_dir = {_toml_value(config.runs_dir)}")
+    for key in ("runs_dir", "reports_dir"):
+        value = getattr(config, key)
+        if value:
+            lines.append(f"{key} = {_toml_value(value)}")
+    if config.runs_dir or config.reports_dir:
         lines.append("")
     for name in ("search", "model", "ui"):
         lines.append(f"[{name}]")

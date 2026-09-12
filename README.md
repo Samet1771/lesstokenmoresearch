@@ -6,11 +6,11 @@ Web research for coding agents, run entirely on your own machine. Your agent
 spends ~30 tokens asking for research; local models do the reading.
 
 ```bash
-ltms research.md
+ltms research.md -o notes/wal.md
 ```
 
 ```
-done · 5 sources read · 19 facts · 360 tokens · ~/.config/ltms/runs/20260912-141931-sqlite-wal/report.md
+done · 5 sources read · 19 facts · 360 tokens · notes/wal.md
 ```
 
 That one line is the entire cost to the calling agent. The report is a file, so
@@ -54,6 +54,23 @@ The two model roles never overlap, so when reading finishes ltms evicts the
 reading model before the report model loads. Leaving both resident on a 16 GB
 card measured 17 GB, spilled the larger model into system RAM, and turned a
 two-minute report into a twenty-minute one.
+
+## Where the report goes
+
+Whoever asked decides.
+
+An agent names its own file with `-o` and gets exactly that path. Without `-o`
+the report stays in the run directory and the printed line points at it — an
+agent reads a path, not a folder.
+
+A person working in the console gets `Documents/ltms/<topic>.md`, under a name
+they can read, because nobody should have to go digging in an app data folder
+for their own research. A second run on the same topic lands beside the first
+rather than replacing it.
+
+Either way the run directory keeps its own copy, next to the evidence that
+produced it. `reports_dir` in the config moves the Documents folder if you
+want it somewhere else.
 
 A run leaves everything behind:
 
@@ -215,8 +232,8 @@ For web research, do not fetch pages yourself. Instead:
 1. Write a brief: a markdown file with `## queries` (the searches to run) and
    optionally `## questions` (what you need answered). `ltms template` prints
    the shape.
-2. Run: ltms <brief.md> --effort medium
-3. Read the report file it prints — all of it, part of it, or none.
+2. Run: ltms <brief.md> --effort medium -o <where you want the report>
+3. Read the report file — all of it, part of it, or none.
 ```
 
 ## Commands
@@ -234,7 +251,7 @@ For web research, do not fetch pages yourself. Instead:
 | `ltms status` | show config and what is reachable |
 | `ltms stop` | stop the managed SearXNG container |
 
-Options: `--effort low\|medium\|high`, `--read N`, `--json`, `--no-window`, `--quiet`
+Options: `--effort low\|medium\|high`, `-o PATH`, `--read N`, `--json`, `--no-window`, `--quiet`
 
 ## Configuration
 
@@ -256,6 +273,8 @@ parallel = 4
 
 [ui]
 open_window = true
+
+# reports_dir = "~/research"   # default: Documents/ltms
 ```
 
 SearXNG needs three non-default settings to be usable as an API — JSON output

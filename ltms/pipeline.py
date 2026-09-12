@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import docker_mgr
 from .brief import Brief
@@ -41,12 +42,32 @@ EFFORTS: dict[str, EffortPreset] = {
 }
 
 
+def publish(body: str, destination: Path) -> Path:
+    """Put the report where it was asked for, without overwriting a neighbour.
+
+    An agent names its own file and expects exactly that path. A person gets a
+    readable name in their Documents folder, and a second run on the same topic
+    should sit beside the first rather than replace it.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and destination.stat().st_size > 0:
+        stem, suffix = destination.stem, destination.suffix or ".md"
+        for number in range(2, 100):
+            candidate = destination.with_name(f"{stem}-{number}{suffix}")
+            if not candidate.exists():
+                destination = candidate
+                break
+    destination.write_text(body, encoding="utf-8", newline="\n")
+    return destination
+
+
 async def run(
     brief: Brief,
     effort: str,
     config: Config,
     writer: RunWriter,
     read_limit: int | None = None,
+    out: Path | None = None,
 ) -> dict:
     preset = EFFORTS[effort]
     read_target = read_limit or preset.read
@@ -98,15 +119,29 @@ async def run(
             if error:
                 writer.note(f"{query[:48]}: {error[:60]}", "warn")
 
-        results, warnings = await backend.search_many(queries, per_query, on_done=on_done)
+        results, warnings, engine_trouble = await backend.search_many(queries, per_query, on_done=on_done)
 
     for warning in warnings[:3]:
         writer.note(warning, "warn")
 
+    # SearXNG answers 200 with nothing when every engine it tried was blocked.
+    # Saying "no results" there sends people hunting for a bug in their query.
+    blocked = " · ".join(f"{name}: {reason}" for name, reason in list(engine_trouble.items())[:4])
+    if engine_trouble:
+        writer.note(f"search engines refusing — {blocked}", "warn" if results else "error")
+
     if not results:
-        writer.stage("search", "fail", "no results")
-        writer.end("failed", summary="search returned nothing")
-        return {"status": "failed", "reason": "no search results"}
+        detail = "every engine refused" if engine_trouble else "no results"
+        writer.stage("search", "fail", detail)
+        reason = (
+            f"search engines are blocking this instance ({blocked}). "
+            "They rate-limit by IP; wait a few minutes, or enable more engines in "
+            "the generated searxng/settings.yml."
+            if engine_trouble
+            else "search returned nothing for these queries"
+        )
+        writer.end("failed", summary=detail)
+        return {"status": "failed", "reason": reason}
 
     domains = len({result.domain for result in results})
     writer.stage("search", "ok", f"{len(results)} hits · {domains} domains")
@@ -271,7 +306,12 @@ async def run(
         writer.stage("write", "ok", f"{estimate_tokens(body)} tokens")
     writer.agent("editor", "done", "")
 
+    # The run directory always keeps a copy: it is the archive, sitting next to
+    # the evidence that produced it.
     writer.report_path.write_text(body, encoding="utf-8", newline="\n")
+    delivered = publish(body, out) if out else writer.report_path
+    if out:
+        writer.note(f"report written to {delivered}")
 
     report_tokens = estimate_tokens(body)
     writer.metric(
@@ -281,7 +321,7 @@ async def run(
     )
 
     summary = f"{len(usable)} sources read · {facts} facts · {report_tokens} tokens"
-    writer.end("ok", report=str(writer.report_path), summary=summary)
+    writer.end("ok", report=str(delivered), summary=summary)
 
     return {
         "status": "ok",
@@ -292,9 +332,17 @@ async def run(
         "pages_read": len(usable),
         "facts": facts,
         "report_tokens": report_tokens,
-        "report": str(writer.report_path),
+        "report": str(delivered),
+        "run_dir": str(writer.dir),
     }
 
 
-def run_sync(brief: Brief, effort: str, config: Config, writer: RunWriter, read_limit: int | None = None) -> dict:
-    return asyncio.run(run(brief, effort, config, writer, read_limit))
+def run_sync(
+    brief: Brief,
+    effort: str,
+    config: Config,
+    writer: RunWriter,
+    read_limit: int | None = None,
+    out: Path | None = None,
+) -> dict:
+    return asyncio.run(run(brief, effort, config, writer, read_limit, out))

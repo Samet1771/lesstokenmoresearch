@@ -36,7 +36,7 @@ from . import docker_mgr
 from .config import Config
 from .llm import DetectedServer, detect_servers, is_embedding_model
 from .pipeline import EFFORTS, run_sync
-from .runs import PROGRESS_FILE, RunState, RunWriter, load_state, new_run_id, resolve_run
+from .runs import PROGRESS_FILE, RunState, RunWriter, _slug, load_state, new_run_id, resolve_run
 from .ui import AGENT_STATE, SPINNER, _bar, _fmt_count, _fmt_elapsed, _short_url
 
 MASCOT = "(ᵔᴗᵔ)"
@@ -723,9 +723,13 @@ class Console(App):
         self.attach(writer.dir)
         self.stamp("●", f"{origin} · {len(brief.queries)} queries · effort [b]{effort}[/b]", "cyan")
 
+        # A person asked for this, so the report goes somewhere a person will
+        # find it, under a name they can read.
+        out = self.config.reports_path / f"{_slug(brief.topic)}.md"
+
         def body() -> None:
             try:
-                run_sync(brief, effort, self.config, writer)
+                run_sync(brief, effort, self.config, writer, out=out)
             except BaseException as error:  # noqa: BLE001 - always close the stream
                 writer.note(str(error).splitlines()[0][:160], "error")
                 writer.end("failed", summary=type(error).__name__)

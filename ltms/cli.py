@@ -2,6 +2,7 @@
 
     ltms                  open the console
     ltms brief.md         run research from a brief you wrote
+    ltms brief.md -o out.md   put the report exactly there
     ltms "topic"          quick one-off, queries expanded from the topic
     ltms template         print a brief skeleton to fill in
     ltms gui              the window: pick models, watch runs
@@ -43,6 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("topic", nargs="*", help="a brief file (.md), or a topic to research")
     parser.add_argument("-e", "--effort", choices=list(EFFORTS), default="medium")
     parser.add_argument("--read", type=int, default=None, help="override how many pages to read")
+    parser.add_argument(
+        "-o", "--out", default=None,
+        help="write the report here, under this name (default: leave it in the run directory)",
+    )
     parser.add_argument("--no-window", action="store_true", help="do not open a dashboard window")
     parser.add_argument("--quiet", action="store_true", help="no dashboard even on a terminal")
     parser.add_argument("--json", action="store_true", help="print the result as JSON")
@@ -79,6 +84,11 @@ def cmd_research(args: argparse.Namespace, console: Console) -> int:
         print(f"failed · {error}", file=sys.stderr)
         return 2
 
+    # A caller that named a destination gets exactly that path. Without one the
+    # report stays in the run directory and the printed line points at it --
+    # an agent reads the path, not a folder.
+    out = Path(args.out).expanduser() if args.out else None
+
     writer = RunWriter(config.runs_path, new_run_id(brief.topic))
     result: dict = {}
     failure: BaseException | None = None
@@ -86,7 +96,7 @@ def cmd_research(args: argparse.Namespace, console: Console) -> int:
     def work() -> None:
         nonlocal result, failure
         try:
-            result = run_sync(brief, args.effort, config, writer, args.read)
+            result = run_sync(brief, args.effort, config, writer, args.read, out)
         except BaseException as error:  # noqa: BLE001 - always close the event stream
             failure = error
             writer.note(str(error).splitlines()[0][:120], "error")
@@ -116,13 +126,22 @@ def cmd_research(args: argparse.Namespace, console: Console) -> int:
 
     if args.json:
         print(json.dumps(result))
-    else:
-        print(
-            f"done · {result.get('pages_read', 0)} sources read"
-            f" · {result.get('facts', 0)} facts"
-            f" · {result.get('report_tokens', 0)} tokens"
-            f" · {result.get('report', '')}"
-        )
+        return 0 if result.get("status") == "ok" else 1
+
+    # A stage can end the run without raising -- no search results, nothing
+    # readable. Printing "done" at that is worse than printing nothing.
+    if result.get("status") != "ok":
+        reason = result.get("reason") or "the run did not finish"
+        print(f"failed · {reason}", file=sys.stderr)
+        print(f"          see {writer.dir}", file=sys.stderr)
+        return 1
+
+    print(
+        f"done · {result.get('pages_read', 0)} sources read"
+        f" · {result.get('facts', 0)} facts"
+        f" · {result.get('report_tokens', 0)} tokens"
+        f" · {result.get('report', '')}"
+    )
     return 0
 
 

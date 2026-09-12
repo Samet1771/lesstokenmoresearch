@@ -185,3 +185,62 @@ class Evidence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportDestination(unittest.TestCase):
+    """Where a report lands depends on who asked for it."""
+
+    def test_an_agent_gets_exactly_the_path_it_named(self):
+        import tempfile
+        from pathlib import Path
+
+        from ltms.pipeline import publish
+
+        with tempfile.TemporaryDirectory() as directory:
+            wanted = Path(directory) / "notes" / "wal-research.md"
+            written = publish("# report", wanted)
+            self.assertEqual(written, wanted)
+            self.assertEqual(written.read_text(encoding="utf-8"), "# report")
+
+    def test_a_second_run_sits_beside_the_first(self):
+        import tempfile
+        from pathlib import Path
+
+        from ltms.pipeline import publish
+
+        with tempfile.TemporaryDirectory() as directory:
+            wanted = Path(directory) / "sqlite-wal.md"
+            first = publish("one", wanted)
+            second = publish("two", wanted)
+            self.assertEqual(first.name, "sqlite-wal.md")
+            self.assertEqual(second.name, "sqlite-wal-2.md")
+            self.assertEqual(first.read_text(encoding="utf-8"), "one")
+
+    def test_an_empty_file_is_not_treated_as_a_neighbour(self):
+        import tempfile
+        from pathlib import Path
+
+        from ltms.pipeline import publish
+
+        with tempfile.TemporaryDirectory() as directory:
+            wanted = Path(directory) / "x.md"
+            wanted.touch()
+            self.assertEqual(publish("body", wanted).name, "x.md")
+
+    def test_a_person_gets_a_folder_in_their_documents(self):
+        from ltms.config import Config, documents_dir
+
+        self.assertEqual(Config().reports_path, documents_dir() / "ltms")
+
+    def test_the_reports_folder_can_be_moved(self):
+        from ltms.config import Config
+
+        self.assertEqual(str(Config(reports_dir="/tmp/elsewhere").reports_path).replace("\\", "/"),
+                         "/tmp/elsewhere")
+
+    def test_documents_is_an_absolute_existing_shaped_path(self):
+        from ltms.config import documents_dir
+
+        found = documents_dir()
+        self.assertTrue(found.is_absolute())
+        self.assertEqual(found.name.lower(), "documents")
