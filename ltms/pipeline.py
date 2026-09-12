@@ -12,13 +12,14 @@ for why that is better than asking a small local model to guess them.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import docker_mgr
 from .brief import Brief
 from .config import Config
-from .extract import EXTRACT_HEADROOM, Extract, extract_many, rank, saved_tokens, thinking_share
+from .extract import EXTRACT_HEADROOM, Extract, extract_many, rank, saved_tokens
 from .fetch import FetchStats, Page, fetch_many
 from .llm import estimate_tokens
 from .report import fallback_report, header, run_roles, write_report
@@ -34,6 +35,12 @@ class EffortPreset:
     roles: int
     queries: int
 
+
+# Reading is the long pole: everything else is a handful of calls, this is one
+# per page. Measured on ten pages, a 2B model took 4 seconds each and a 27B one
+# never finished a run anyone was willing to wait for. Past this, say so while
+# there is still time to stop.
+SLOW_PAGE_SECONDS = 30.0
 
 EFFORTS: dict[str, EffortPreset] = {
     "low": EffortPreset(candidates=25, read=10, roles=1, queries=4),
@@ -213,17 +220,36 @@ async def run(
         return {"status": "failed", "reason": "no readable pages"}
 
     read_done = 0
+    projected = False
+    reading_started = time.monotonic()
 
     def read_started(index: int, page: Page) -> None:
         writer.agent(f"scout-{index % readers + 1}", "read", page.url)
 
     def read_finished(index: int, extract: Extract) -> None:
-        nonlocal read_done
+        nonlocal read_done, projected
         read_done += 1
         # The reader's whole output, on disk, before it goes away.
         writer.write_note(index, extract.url, extract.to_markdown())
         writer.agent(f"scout-{index % readers + 1}", "idle", "", extract.relevance if extract.usable else None)
         writer.progress("read", read_target + read_done, read_target * 2)
+
+        # Say it now, not in the summary. Learning at the end that the model
+        # was too slow means having already waited; the whole point of saying
+        # anything is that there is still time to stop and pick another one.
+        if projected:
+            return
+        projected = True
+        elapsed = time.monotonic() - reading_started
+        rate = elapsed / max(1, min(read_done, readers))
+        if rate > SLOW_PAGE_SECONDS:
+            minutes = rate * len(pages) / max(1, readers) / 60
+            writer.note(
+                f"{rate:.0f}s for the first page — these {len(pages)} will take about "
+                f"{minutes:.0f} min. A smaller model for the reading role is usually "
+                "the difference between minutes and an hour.",
+                "warn",
+            )
 
     warning = residency.context_warning(config.model.for_role("fast"), EXTRACT_HEADROOM + 7000)
     if warning:
@@ -252,13 +278,6 @@ async def run(
         writer.end("failed", summary="the reading model returned nothing usable")
         return {"status": "failed", "reason": "extraction produced nothing"}
 
-    thinking = thinking_share(extracts)
-    if thinking > 0.5:
-        writer.note(
-            f"the reading model spent {thinking:.0%} of its output thinking — "
-            "a plain instruct model would read these pages far faster",
-            "warn",
-        )
 
     facts = sum(len(extract.facts) for extract in usable)
     writer.stage("read", "ok", f"{len(usable)} pages read · {facts} facts")

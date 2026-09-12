@@ -149,7 +149,7 @@ there; the transcript fills in as it happens rather than arriving at the end.
  14:19:36  ✓  search  45 hits · 23 domains
  14:19:36  ✓  filter  25 kept  (10 duplicate · 3 domain_cap)
  14:19:38  ·  fetched 6 pages, 6 readable
- 14:22:34  !  the reading model spent 76% of its output thinking
+ 14:19:52  !  38s for the first page — these 12 will take about 8 min
  14:22:34  ✓  read    5 pages read · 19 facts
  14:23:59  ◆  done    5 sources read · 19 facts · 360 tokens
               ~/ltms/runs/20260912-141931-sqlite-wal/report.md
@@ -379,21 +379,46 @@ could only be the wrong one: too low truncates an answer mid-sentence, too high
 does nothing. If a model runs out of room before it answers, raise the limit
 where you set it.
 
-**Avoid reasoning models for either role.** They spend their budget thinking
-before they answer, and locally that is pure latency. The same brief, same six
-pages, on one 16 GB machine:
+**The two roles want different models, and both want fast ones.**
 
-| | 27B reasoning | 4B instruct |
+Same ten pages, same prompt, on one 16 GB machine. Three of the pages answered
+the brief; seven were noise the search dragged in — a horoscope site, an SVG
+attribute reference, a vendor home page:
+
+| reading | 2B reasoning | 4B instruct |
 |---|---|---|
-| pages read | 4 | 5 |
-| facts extracted | 8 | 19 |
-| debate | 82s | 30s |
-| report | 96s, unusable | 34s, 360 tokens |
+| time | **44s** | 86s |
+| facts from the 3 relevant pages | 6 | **8** |
+| facts invented from the 7 irrelevant ones | **2** | 14 |
+| irrelevant pages correctly scored 0.0 | **6/6** | **0/6** |
 
-The reasoning model spent 96% of its output thinking, then ran out of room
-before writing anything. ltms detects this and says so rather than shipping a
-transcript of deliberation as a report — but the fix is to pick a plain
-instruct model.
+The instruct model wrote down that the zodiac is Greek for "circle of animals"
+and what an SVG spot light cone is. Both true, neither asked for, and both land
+in the evidence the report is written from. The reasoning model scored every
+one of those pages at zero, and on a borderline page wrote "this page does not
+explain honouring Retry-After" — answering the brief rather than summarising
+the page. **Reasoning wins the reading role.**
+
+Then the same evidence, written up:
+
+| report | 2B reasoning | 4B instruct |
+|---|---|---|
+| time | 14s | 33s |
+| required headings | **0/4** | **4/4** |
+| gaps section | "none found" | two real gaps named |
+| sources | listed one it never cited | only what it cited |
+
+The reasoning model ignored the format it was given. **Instruct wins the report
+role**, where following an exact structure is the job.
+
+**Both roles want a model that finishes.** A 27B reasoning model was dropped
+from these measurements because nobody was willing to wait for it. Reading is
+one call per page, so it is where a slow model hurts: ltms times the first page
+and says what the rest will cost, while there is still time to stop and pick
+something smaller.
+
+That is the whole trade-off: `fast_name` a small reasoning model, `name` a
+plain instruct model.
 
 Extractor agents run concurrently, so raise the server's own parallel-request
 limit to match `parallel` — otherwise the requests queue and nothing is gained.

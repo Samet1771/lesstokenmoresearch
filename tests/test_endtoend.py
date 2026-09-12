@@ -7,6 +7,7 @@ wires the stages together is real.
 """
 
 import contextlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -280,6 +281,63 @@ class BlockedPagesDoNotCostSources(unittest.TestCase):
 
         result, _ = self.run_with(everything_refuses)
         self.assertEqual(result["status"], "failed")
+
+class SlowReadingIsCalledOutEarly(unittest.TestCase):
+    """Learning at the end that the model was too slow means having waited."""
+
+    def setUp(self) -> None:
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+
+    def run_at_speed(self, seconds_per_page):
+        """A clock that advances by `seconds_per_page` on every reading call."""
+
+        class Clock:
+            def __init__(self):
+                self.now = 0.0
+
+            def monotonic(self):
+                self.now += seconds_per_page
+                return self.now
+
+        async def timed_extract(pages, topic, instructions, model_config,
+                                concurrency=4, on_start=None, on_done=None):
+            return await fake_extract(pages, topic, instructions, model_config,
+                                      concurrency, on_start, on_done)
+
+        with Harness():
+            pipeline.extract_many = timed_extract
+            saved, pipeline.time = pipeline.time, Clock()
+            try:
+                writer = RunWriter(Path(self._home.name) / "runs", "test-run")
+                pipeline.run_sync(BRIEF, "low", Config(), writer, read_limit=4)
+            finally:
+                pipeline.time = saved
+        events = [json.loads(line) for line in
+                  writer.progress_path.read_text(encoding="utf-8").splitlines()]
+        return events
+
+    def warning_index(self, events):
+        for index, event in enumerate(events):
+            if event["type"] == "note" and "first page" in event.get("text", ""):
+                return index
+        return None
+
+    def test_a_slow_model_is_flagged_while_the_run_can_still_be_stopped(self):
+        events = self.run_at_speed(120.0)
+        where = self.warning_index(events)
+        self.assertIsNotNone(where, "no warning about a slow reading model")
+        read_ok = next(i for i, e in enumerate(events)
+                       if e["type"] == "stage" and e["name"] == "read" and e["status"] == "ok")
+        self.assertLess(where, read_ok, "the warning arrived after the reading finished")
+
+    def test_it_is_said_once_not_once_per_page(self):
+        events = self.run_at_speed(120.0)
+        said = [e for e in events if e["type"] == "note" and "first page" in e.get("text", "")]
+        self.assertEqual(len(said), 1)
+
+    def test_a_fast_model_is_not_nagged(self):
+        self.assertIsNone(self.warning_index(self.run_at_speed(1.0)))
 
 
 if __name__ == "__main__":
