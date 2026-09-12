@@ -339,6 +339,67 @@ class SlowReadingIsCalledOutEarly(unittest.TestCase):
     def test_a_fast_model_is_not_nagged(self):
         self.assertIsNone(self.warning_index(self.run_at_speed(1.0)))
 
+class TheQueriesAreVisible(unittest.TestCase):
+    """A run that searches the wrong thing looks exactly like one that searches
+    the right thing, until the report comes back wrong."""
+
+    def setUp(self) -> None:
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+
+    def notes(self, brief=BRIEF):
+        with Harness():
+            writer = RunWriter(Path(self._home.name) / "runs", "test-run")
+            pipeline.run_sync(brief, "low", Config(), writer, read_limit=2)
+        return [json.loads(line) for line in
+                writer.progress_path.read_text(encoding="utf-8").splitlines()]
+
+    def test_every_query_is_printed_before_the_search_runs(self):
+        events = self.notes()
+        printed = [e["text"][2:] for e in events
+                   if e["type"] == "note" and e.get("text", "").startswith("? ")]
+        self.assertEqual(printed, BRIEF.queries)
+        first_search = next(i for i, e in enumerate(events)
+                            if e["type"] == "stage" and e["name"] == "search" and e["status"] == "run")
+        last_printed = max(i for i, e in enumerate(events)
+                           if e["type"] == "note" and e.get("text", "").startswith("? "))
+        self.assertLess(last_printed, first_search, "queries printed after the search started")
+
+    def test_each_query_reports_what_it_found(self):
+        events = self.notes()
+        counted = [e["text"] for e in events
+                   if e["type"] == "note" and "hits · " in e.get("text", "")]
+        self.assertEqual(len(counted), len(BRIEF.queries))
+
+
+class NothingSurvivedTriage(unittest.TestCase):
+    def setUp(self) -> None:
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+
+    def test_it_says_so_instead_of_blaming_the_fetcher(self):
+        class OffTopicBackend(FakeBackend):
+            async def search_many(self, queries, per_query, on_done=None):
+                results = [
+                    SearchResult(title="BEST | Cambridge Dictionary", url=f"https://dict{i}.test/b",
+                                 score=0.9, query=queries[0])
+                    for i in range(6)
+                ]
+                for query in queries:
+                    if on_done:
+                        on_done(query, len(results), None)
+                return results, [], {}
+
+        with Harness():
+            pipeline.SearxngBackend = OffTopicBackend
+            writer = RunWriter(Path(self._home.name) / "runs", "test-run")
+            result = pipeline.run_sync(BRIEF, "low", Config(), writer, read_limit=2)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("off_topic", result["reason"])
+        state = load_state(writer.progress_path)
+        self.assertEqual(state.stages["filter"].status, "fail")
+
 
 if __name__ == "__main__":
     unittest.main()

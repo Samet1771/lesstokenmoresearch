@@ -322,6 +322,41 @@ once they all refuse. Three things keep a run working through that:
 When engines do refuse, ltms names them and says so, rather than reporting
 "no results" and sending you looking for a bug in your query.
 
+### Searching the right thing
+
+ltms prints every query before it runs it:
+
+```
+ ?  mekanik klavye tavsiye 5000 tl
+ ?  mekanik klavye tavsiye 5000 tl comparison
+ ·  nothing technical in these queries — not asking the developer engines
+ ·  10 hits · mekanik klavye tavsiye 5000 tl
+ ✓  filter  6 kept  (12 duplicate · 20 off_topic · 2 domain_cap)
+```
+
+A run that searches the wrong thing looks exactly like one that searches the
+right thing until the report comes back wrong. Three things were wrong often
+enough to be worth fixing:
+
+- **The `it` engines answer everything.** stackoverflow, github, MDN and docker
+  hub do not rate-limit, which is why they are on by default — but they reply
+  to any query at all. "Best mechanical keyboards in Turkey" came back with 14
+  of its 20 candidates from MDN. They are now asked only when the queries
+  contain something technical.
+- **One word is not a match.** Small indexes answer a long query by matching a
+  single word out of it: the same search returned a radio station called Best
+  FM, three dictionary entries for "best", and Wikipedia on mechanical
+  engineering. A result now has to share two content words with the query, in
+  the title, snippet or URL. What is *useful* is still the reader agents'
+  judgement; this only removes what is about a different subject.
+- **`google cse` is disabled.** Without a Google API key of your own it matches
+  single words, and it supplied 13 of 20 hits because the engines that would
+  have answered properly were rate-limited.
+
+`ltms "some topic"` also stopped bolting software words onto whatever you
+typed. "documentation", "benchmark data" and "official specification" are how
+a question about keyboards became a question about MDN.
+
 ### Pages that refuse to be read
 
 About a fifth of the open web will not be read by a program. Fetching 180 URLs

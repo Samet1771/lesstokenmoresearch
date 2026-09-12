@@ -1,5 +1,6 @@
 """Tests for the pure pieces: brief parsing, URL handling, triage, event replay."""
 
+import collections
 import os
 import tempfile
 import textwrap
@@ -14,7 +15,9 @@ from ltms.llm import DetectedServer
 from ltms.llm import is_embedding_model, parse_json_list, strip_thinking
 from ltms.pipeline import EFFORTS
 from ltms.runs import RunState
-from ltms.search.base import SearchResult, canonical_url, dedupe_and_cap
+from ltms.search.base import (
+    SearchResult, canonical_url, categories_for, dedupe_and_cap, matches_query,
+)
 
 
 def result(url: str, *, title: str = "t", score: float = 1.0) -> SearchResult:
@@ -361,6 +364,119 @@ class HomeFolder(unittest.TestCase):
         (self.home / "AppData" / "Roaming" / "ltms").mkdir(parents=True)
         with mock.patch.dict(os.environ, {"LTMS_HOME": str(self.home / "elsewhere")}):
             self.assertEqual(migrate_legacy(), [])
+
+class DeveloperEnginesOnlyForDeveloperQuestions(unittest.TestCase):
+    """SearXNG's `it` engines answer anything, including questions about
+    keyboards. One real run came back with 14 of 20 candidates from MDN."""
+
+    def test_a_technical_question_keeps_them(self):
+        for query in ("postgres replication lag", "http 429 retry-after",
+                      "docker compose healthcheck", "python 3.12 asyncio"):
+            self.assertEqual(categories_for([query], "general,it"), "general,it", query)
+
+    def test_an_ordinary_question_drops_them(self):
+        for query in ("best mechanical keyboards in turkey under 5000 tl",
+                      "how to cook lentil soup", "leopard gecko care guide"):
+            self.assertEqual(categories_for([query], "general,it"), "general", query)
+
+    def test_one_technical_query_is_enough_to_keep_them(self):
+        self.assertEqual(
+            categories_for(["gecko care guide", "sqlite wal journal mode"], "general,it"),
+            "general,it",
+        )
+
+    def test_a_configuration_without_them_is_left_alone(self):
+        self.assertEqual(categories_for(["anything at all"], "general"), "general")
+
+
+class OffTopicResults(unittest.TestCase):
+    """Weak indexes answer a query by matching one word out of it."""
+
+    QUERY = "best mechanical keyboards in turkey under 5000 tl"
+
+    def hit(self, title, url="https://example.com/x", snippet=""):
+        return SearchResult(title=title, url=url, snippet=snippet, query=self.QUERY)
+
+    def test_the_junk_a_single_word_match_produces_is_dropped(self):
+        for title, url in (
+            ("Best FM Dinle | 98.4 Radyo Best FM", "https://canliradyodinle.fm/best-fm"),
+            ("BEST | English meaning - Cambridge Dictionary", "https://dictionary.cambridge.org/best"),
+            ("Mechanical engineering - Wikipedia", "https://en.wikipedia.org/wiki/Mechanical_engineering"),
+        ):
+            self.assertFalse(matches_query(self.hit(title, url)), title)
+
+    def test_a_result_about_the_subject_survives(self):
+        self.assertTrue(matches_query(self.hit("The best mechanical keyboards in Turkey")))
+
+    def test_it_judges_a_query_in_its_own_language(self):
+        # Substrings cannot translate: a Turkish page answers a Turkish query.
+        # This is why ltms prints the queries -- asking in the wrong language
+        # is invisible until you see them.
+        result = SearchResult(title="5000 TL mekanik klavye onerisi",
+                              url="https://technopat.net/5000-tl-mekanik",
+                              query="mekanik klavye tavsiye 5000 tl")
+        self.assertTrue(matches_query(result))
+
+    def test_a_page_about_a_keyboard_answers_a_question_about_keyboards(self):
+        self.assertTrue(matches_query(self.hit("Buy a mechanical keyboard in Turkey")))
+
+    def test_a_query_too_short_to_judge_is_left_alone(self):
+        result = SearchResult(title="anything", url="https://example.com", query="wal")
+        self.assertTrue(matches_query(result))
+
+    def test_the_filter_reports_what_it_dropped(self):
+        results = [
+            SearchResult(title="mechanical keyboards turkey review", url="https://a.test/1", query=self.QUERY),
+            SearchResult(title="BEST | Cambridge Dictionary", url="https://b.test/2", query=self.QUERY),
+        ]
+        outcome = dedupe_and_cap(results, limit=10)
+        self.assertEqual(len(outcome.results), 1)
+        self.assertEqual(outcome.dropped.get("off_topic"), 1)
+
+
+class OneSiteCannotBeTheWholeSearch(unittest.TestCase):
+    def test_a_thin_search_relaxes_the_domain_cap_without_abandoning_it(self):
+        # 20 pages from one site, and a budget asking for 20.
+        results = [
+            SearchResult(title=f"mechanical keyboards turkey {i}", url=f"https://one.test/{i}",
+                         score=1.0 - i / 100, query="mechanical keyboards turkey")
+            for i in range(20)
+        ]
+        outcome = dedupe_and_cap(results, limit=20, per_domain=3)
+        # Relaxed to twice the cap, not abandoned: this is the bug where MDN
+        # supplied 14 of 20 candidates because the search was thin.
+        self.assertEqual(len(outcome.results), 6)
+        self.assertEqual(outcome.dropped.get("domain_cap"), 14)
+
+    def test_a_healthy_search_holds_the_cap(self):
+        # Five sites, four pages each, and a budget the cap already satisfies:
+        # nothing is short, so nothing is relaxed.
+        results = [
+            SearchResult(title=f"mechanical keyboards turkey {i}",
+                         url=f"https://site{i % 5}.test/{i}", score=1.0 - i / 100,
+                         query="mechanical keyboards turkey")
+            for i in range(20)
+        ]
+        outcome = dedupe_and_cap(results, limit=10, per_domain=3)
+        self.assertEqual(len(outcome.results), 10)
+        self.assertEqual(outcome.dropped.get("domain_cap"), 5)
+        counts = collections.Counter(r.domain for r in outcome.results)
+        self.assertLessEqual(max(counts.values()), 3, "the cap was relaxed with no need")
+
+
+class TopicExpansion(unittest.TestCase):
+    """The angles used to be software words, bolted onto any subject."""
+
+    def test_it_does_not_ask_the_web_for_keyboard_documentation(self):
+        queries = from_topic("best mechanical keyboards in turkey", 8).queries
+        for jargon in ("documentation", "specification", "benchmark data", "internally"):
+            self.assertFalse(any(jargon in query for query in queries), jargon)
+
+    def test_the_topic_itself_is_always_the_first_query(self):
+        self.assertEqual(from_topic("leopard gecko care", 5).queries[0], "leopard gecko care")
+
+    def test_rephrasing_one_sentence_twelve_times_is_not_research(self):
+        self.assertLessEqual(len(from_topic("anything", 12).queries), 5)
 
 
 if __name__ == "__main__":

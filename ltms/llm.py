@@ -7,6 +7,7 @@ omission.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -169,6 +170,23 @@ class LocalModel:
         finally:
             if owns:
                 await client.aclose()
+
+    async def warm_up(self, client: httpx.AsyncClient, attempts: int = 4, gap: float = 4.0) -> bool:
+        """Get the model loaded before a crowd of callers arrives at once.
+
+        LM Studio loads a model when the first request needs it and fails the
+        requests that arrive meanwhile. One request is not enough to warm it:
+        that request is itself the one that gets refused while the weights are
+        still coming off disk. So keep asking until one succeeds.
+        """
+        for attempt in range(attempts):
+            try:
+                await self.chat(system="Reply with ok.", user="ok", max_tokens=8, client=client)
+                return True
+            except ModelError:
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(gap)
+        return False
 
     async def _ollama(
         self, client: httpx.AsyncClient, system: str, user: str, max_tokens: int | None, temperature: float

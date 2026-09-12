@@ -25,7 +25,7 @@ from .llm import estimate_tokens
 from .report import fallback_report, header, run_roles, write_report
 from . import residency
 from .runs import RunWriter
-from .search import SearxngBackend, dedupe_and_cap
+from .search import SearxngBackend, categories_for, dedupe_and_cap
 
 
 @dataclass(frozen=True)
@@ -110,10 +110,19 @@ async def run(
     if not brief.path:
         writer.note("no brief file — queries expanded from the topic; a brief finds better sources", "warn")
 
+    # Print them. A run that searches the wrong thing looks exactly like a run
+    # that searches the right thing until the report comes back wrong, and the
+    # queries are the one place where that is visible up front.
+    for query in queries:
+        writer.note(f"? {query}")
+
     # ---------------------------------------------------------------- search
     writer.stage("search", "run")
+    categories = categories_for(queries, config.search.categories)
+    if categories != config.search.categories:
+        writer.note("nothing technical in these queries — not asking the developer engines")
     with docker_mgr.searxng(config, report=lambda text, level: writer.note(text, level)) as base_url:
-        backend = SearxngBackend(base_url, concurrency=2, categories=config.search.categories)
+        backend = SearxngBackend(base_url, concurrency=2, categories=categories)
         per_query = max(6, min(20, preset.candidates // max(1, len(queries)) + 4))
 
         done = 0
@@ -125,6 +134,8 @@ async def run(
             writer.progress("search", done, len(queries))
             if error:
                 writer.note(f"{query[:48]}: {error[:60]}", "warn")
+            else:
+                writer.note(f"{found:3d} hits · {query}")
 
         results, warnings, engine_trouble = await backend.search_many(queries, per_query, on_done=on_done)
 
@@ -158,6 +169,23 @@ async def run(
     outcome = dedupe_and_cap(results, limit=preset.candidates, per_domain=3)
     dropped = " · ".join(f"{count} {name}" for name, count in outcome.dropped.items())
     writer.stage("filter", "ok", f"{len(outcome.results)} kept" + (f"  ({dropped})" if dropped else ""))
+
+    # Everything found, nothing kept. Without this the run limps on to fetch an
+    # empty shortlist and reports "no readable pages", which describes neither
+    # what happened nor what to do about it.
+    if not outcome.results:
+        why = " · ".join(f"{count} {name}" for name, count in outcome.dropped.items())
+        writer.stage("filter", "fail", f"nothing survived triage ({why})")
+        writer.end("failed", summary="every result was filtered out")
+        return {
+            "status": "failed",
+            "reason": (
+                f"the search found {len(results)} results and none of them survived triage "
+                f"({why}). off_topic means the engines answered a different question; "
+                "noise means the sources were sites nothing can read, like reddit or "
+                "instagram. Try wording the queries the way the pages you want are written."
+            ),
+        }
 
     writer.write_json("sources.json", [result.to_dict() for result in outcome.results])
 

@@ -221,7 +221,7 @@ def settings_dir() -> Path:
 
 
 # Bump when the generated settings change in a way existing users need.
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 VERSION_MARKER = "# ltms-settings-version:"
 
 # The stock configuration enables three web engines: duckduckgo, brave and
@@ -229,6 +229,13 @@ VERSION_MARKER = "# ltms-settings-version:"
 # a search returns almost nothing. These are independent indexes that do not
 # throttle a single machine, so one blocked engine stops being fatal.
 EXTRA_ENGINES = ["mojeek", "qwant", "bing", "mwmbl", "crowdview"]
+
+# Measured, not assumed. Without a Google API key of your own, SearXNG's
+# "google cse" engine matches single words out of a query instead of the query:
+# "best mechanical keyboards in turkey" returned a radio station called Best FM
+# and three dictionary definitions of "best", and it supplied 13 of the 20 hits
+# because the engines that would have answered properly were rate-limited.
+DISABLED_ENGINES = ["google cse"]
 
 
 def ensure_settings(force: bool = False) -> Path:
@@ -287,6 +294,8 @@ def ensure_settings(force: bool = False) -> Path:
     ]
     for engine in EXTRA_ENGINES:
         lines.extend([f'  - name: {engine}', "    disabled: false"])
+    for engine in DISABLED_ENGINES:
+        lines.extend([f'  - name: {engine}', "    disabled: true"])
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8", newline="\n")

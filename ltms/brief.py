@@ -179,20 +179,26 @@ def from_topic(topic: str, count: int) -> Brief:
     No model involved. These are worse than queries a caller writes by hand,
     which is exactly why the brief file is the recommended path.
     """
+    # These used to be software words -- "documentation", "benchmark data",
+    # "official specification". Bolted onto "best mechanical keyboards in
+    # turkey" they asked the web for keyboard documentation, and the web
+    # answered with MDN. An angle has to make sense whatever the subject is, so
+    # these say how to look at a thing rather than assuming what kind of thing
+    # it is.
     angles = [
         "",
-        "documentation",
-        "benchmark data",
-        "problems limitations",
-        "comparison alternatives",
-        "best practices",
-        "case study",
-        "how it works internally",
-        "official specification",
-        "known issues",
-        "performance tuning",
-        "migration experience",
+        "comparison",
+        "problems",
+        "guide",
+        "reviews",
+        "recommendations",
+        "explained",
+        "examples",
     ]
+    # Fewer, too. A topic is one sentence of intent, and the fourth rephrasing
+    # of one sentence finds what the first three already found. Write a brief
+    # if you want twelve angles -- you know the subject and ltms does not.
+    count = min(count, 5)
     queries: list[str] = []
     for angle in angles:
         query = f"{topic} {angle}".strip()
