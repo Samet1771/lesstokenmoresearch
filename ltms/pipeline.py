@@ -4,28 +4,22 @@ Phase 0 implements: plan -> search -> filter.
 Phases still to come: read (fetch + per-page extraction), rank, debate, write.
 Stages that are not implemented yet are emitted as `skip` so the dashboard shows
 the whole shape of the run rather than pretending it ended early.
+
+There is no query-planning model. The caller writes the queries -- see brief.py
+for why that is better than asking a small local model to guess them.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from pathlib import Path
 
 from . import docker_mgr
+from .brief import Brief
 from .config import Config
-from .llm import LocalModel, ModelError, estimate_tokens, parse_json_list
+from .llm import estimate_tokens
 from .runs import RunWriter
 from .search import SearxngBackend, dedupe_and_cap
-
-PLANNER_SYSTEM = (
-    "You turn a research topic into web search queries. "
-    "Output a JSON array of strings and nothing else. "
-    "Each query is 3-10 words, plain keywords, no boolean operators, no quotes. "
-    "Cover: the core question, primary/official sources, concrete data, "
-    "criticism and failure modes, and comparisons. "
-    "Write queries in the language most likely used by the best sources on this topic."
-)
 
 
 @dataclass(frozen=True)
@@ -43,56 +37,8 @@ EFFORTS: dict[str, EffortPreset] = {
 }
 
 
-def fallback_queries(topic: str, count: int) -> list[str]:
-    """Used when no model server is reachable. Deliberately plain."""
-    angles = [
-        "",
-        "documentation",
-        "benchmark data",
-        "problems limitations",
-        "comparison alternatives",
-        "best practices",
-        "case study",
-        "how it works internally",
-        "official specification",
-        "known issues",
-        "performance tuning",
-        "migration experience",
-    ]
-    seen: list[str] = []
-    for angle in angles:
-        query = f"{topic} {angle}".strip()
-        if query not in seen:
-            seen.append(query)
-        if len(seen) >= count:
-            break
-    return seen
-
-
-async def plan_queries(model: LocalModel, topic: str, count: int) -> tuple[list[str], str]:
-    """Returns (queries, source) where source is 'model' or 'fallback'."""
-    try:
-        if not await model.available():
-            return fallback_queries(topic, count), "fallback"
-        reply = await model.chat(
-            system=PLANNER_SYSTEM,
-            user=f"Topic: {topic}\nProduce exactly {count} queries.",
-            max_tokens=500,
-            temperature=0.3,
-        )
-    except ModelError:
-        return fallback_queries(topic, count), "fallback"
-
-    queries = parse_json_list(reply.text)[:count]
-    if len(queries) < 2:
-        return fallback_queries(topic, count), "fallback"
-    if topic.lower() not in {q.lower() for q in queries}:
-        queries.insert(0, topic)
-    return queries[:count], "model"
-
-
 async def run(
-    topic: str,
+    brief: Brief,
     effort: str,
     config: Config,
     writer: RunWriter,
@@ -100,20 +46,37 @@ async def run(
 ) -> dict:
     preset = EFFORTS[effort]
     read_target = read_limit or preset.read
+    queries = brief.queries[:30]
 
-    writer.meta(topic, effort, candidates=preset.candidates, read_target=read_target)
+    writer.meta(
+        brief.topic,
+        effort,
+        candidates=preset.candidates,
+        read_target=read_target,
+        brief=str(brief.path) if brief.path else "",
+    )
     for stage in ("plan", "search", "filter", "read", "rank", "debate", "write"):
         writer.stage(stage, "pending")
 
-    model = LocalModel(config.model)
-
     # ------------------------------------------------------------------ plan
     writer.stage("plan", "run")
-    queries, source = await plan_queries(model, topic, preset.queries)
-    if source == "fallback":
-        writer.note("no model server reachable — using keyword expansion for queries", "warn")
-    writer.stage("plan", "ok", f"{len(queries)} queries · {source}")
-    writer.write_json("queries.json", queries)
+    origin = "brief" if brief.path else "topic"
+    detail = f"{len(queries)} queries · {origin}"
+    if brief.questions:
+        detail += f" · {len(brief.questions)} questions"
+    writer.stage("plan", "ok", detail)
+    writer.write_json(
+        "brief.json",
+        {
+            "topic": brief.topic,
+            "queries": queries,
+            "questions": brief.questions,
+            "notes": brief.notes,
+            "source": str(brief.path) if brief.path else "",
+        },
+    )
+    if not brief.path:
+        writer.note("no brief file — queries expanded from the topic; a brief finds better sources", "warn")
 
     # ---------------------------------------------------------------- search
     writer.stage("search", "run")
@@ -166,12 +129,14 @@ async def run(
     return {
         "status": "ok",
         "run_id": writer.run_id,
+        "topic": brief.topic,
         "queries": len(queries),
+        "questions": len(brief.questions),
         "candidates": len(outcome.results),
         "domains": domains,
         "sources_file": str(writer.dir / "sources.json"),
     }
 
 
-def run_sync(topic: str, effort: str, config: Config, writer: RunWriter, read_limit: int | None = None) -> dict:
-    return asyncio.run(run(topic, effort, config, writer, read_limit))
+def run_sync(brief: Brief, effort: str, config: Config, writer: RunWriter, read_limit: int | None = None) -> dict:
+    return asyncio.run(run(brief, effort, config, writer, read_limit))

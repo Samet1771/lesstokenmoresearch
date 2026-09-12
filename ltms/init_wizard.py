@@ -62,18 +62,18 @@ def run_wizard(console: Console | None = None) -> int:
     runtime = docker_mgr.find_runtime()
     runtime_usable = False
     if runtime is None:
-        _warn(console, "no Docker or Podman found")
-        _info(console, "Windows, terminal only:  winget install RedHat.Podman")
-        _info(console, "                         podman machine init && podman machine start")
-        _info(console, "Linux:                   https://docs.docker.com/engine/install/")
-        _info(console, "macOS:                   brew install podman")
+        _warn(console, "no container engine found")
+        _info(console, "Windows: install.ps1 sets up Docker inside WSL2, or by hand:")
+        _info(console, "           wsl --install -d Ubuntu")
+        _info(console, "           wsl -d Ubuntu -u root -- sh -c 'curl -fsSL https://get.docker.com | sh'")
+        _info(console, "Linux:   https://docs.docker.com/engine/install/")
     else:
         ready, detail = docker_mgr.runtime_ready(runtime)
         if ready:
-            _ok(console, f"{runtime.name} ready (server {detail})")
+            _ok(console, f"{runtime.label} ready (server {detail})")
             runtime_usable = True
         else:
-            _warn(console, f"{runtime.name} found but not running — start it, then rerun `ltms init`")
+            _warn(console, f"{runtime.label} found but not responding — start it, then rerun `ltms init`")
             _info(console, detail)
     console.print()
 

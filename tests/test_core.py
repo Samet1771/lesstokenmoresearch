@@ -1,15 +1,91 @@
-"""Tests for the pure pieces: URL handling, triage, event replay, planning."""
+"""Tests for the pure pieces: brief parsing, URL handling, triage, event replay."""
 
+import textwrap
 import unittest
 
+from ltms.brief import BriefError, from_topic, parse
 from ltms.llm import is_embedding_model, parse_json_list, strip_thinking
-from ltms.pipeline import EFFORTS, fallback_queries
+from ltms.pipeline import EFFORTS
 from ltms.runs import RunState
 from ltms.search.base import SearchResult, canonical_url, dedupe_and_cap
 
 
 def result(url: str, *, title: str = "t", score: float = 1.0) -> SearchResult:
     return SearchResult(title=title, url=url, score=score)
+
+
+FULL_BRIEF = textwrap.dedent(
+    """
+    # postgres replication lag
+
+    ## queries
+    - postgres logical replication lag causes
+    - postgres wal sender bottleneck
+    - postgres logical replication lag causes
+
+    ## questions
+    - What makes lag grow under heavy writes?
+
+    ## notes
+    Prefer official docs over blog posts.
+    """
+)
+
+
+class BriefParsing(unittest.TestCase):
+    def test_reads_every_section(self):
+        brief = parse(FULL_BRIEF)
+        self.assertEqual(brief.topic, "postgres replication lag")
+        self.assertEqual(
+            brief.queries,
+            ["postgres logical replication lag causes", "postgres wal sender bottleneck"],
+        )
+        self.assertEqual(len(brief.questions), 1)
+        self.assertEqual(brief.notes, "Prefer official docs over blog posts.")
+
+    def test_questions_and_notes_are_optional(self):
+        brief = parse("# topic\n\n## queries\n- one good search\n")
+        self.assertEqual(brief.questions, [])
+        self.assertEqual(brief.notes, "")
+        self.assertEqual(brief.instructions, "")
+
+    def test_bare_list_of_lines_is_accepted(self):
+        brief = parse("first search here\nsecond search here\n")
+        self.assertEqual(len(brief.queries), 2)
+        self.assertEqual(brief.topic, "first search here")
+
+    def test_ignores_fenced_code(self):
+        brief = parse("## queries\n- real search\n\n```\nnot a search\n```\n")
+        self.assertEqual(brief.queries, ["real search"])
+
+    def test_accepts_every_bullet_style(self):
+        brief = parse("## queries\n1. first search\n* second search\n+ third search\n")
+        self.assertEqual(len(brief.queries), 3)
+
+    def test_section_aliases(self):
+        brief = parse("## searches\n- a search\n\n## sorular\n- bir soru\n")
+        self.assertEqual(brief.queries, ["a search"])
+        self.assertEqual(brief.questions, ["bir soru"])
+
+    def test_instructions_combine_questions_and_notes(self):
+        instructions = parse(FULL_BRIEF).instructions
+        self.assertIn("What makes lag grow", instructions)
+        self.assertIn("official docs", instructions)
+
+    def test_brief_without_queries_is_rejected(self):
+        with self.assertRaises(BriefError):
+            parse("# just a title\n\n## questions\n- nothing to search\n")
+
+
+class InlineTopic(unittest.TestCase):
+    def test_keeps_the_topic_first_and_is_unique(self):
+        brief = from_topic("sqlite wal", 5)
+        self.assertEqual(brief.queries[0], "sqlite wal")
+        self.assertEqual(len(brief.queries), len(set(brief.queries)))
+        self.assertEqual(len(brief.queries), 5)
+
+    def test_has_no_source_file(self):
+        self.assertIsNone(from_topic("anything", 3).path)
 
 
 class CanonicalUrl(unittest.TestCase):
@@ -92,13 +168,7 @@ class EventReplay(unittest.TestCase):
         self.assertLessEqual(len(state.notes), 6)
 
 
-class Planning(unittest.TestCase):
-    def test_fallback_keeps_the_topic_first_and_is_unique(self):
-        queries = fallback_queries("sqlite wal", 5)
-        self.assertEqual(queries[0], "sqlite wal")
-        self.assertEqual(len(queries), len(set(queries)))
-        self.assertEqual(len(queries), 5)
-
+class Efforts(unittest.TestCase):
     def test_every_effort_reads_no_more_than_it_gathers(self):
         for name, preset in EFFORTS.items():
             self.assertLessEqual(preset.read, preset.candidates, name)
@@ -107,8 +177,7 @@ class Planning(unittest.TestCase):
 
 class ModelReplyParsing(unittest.TestCase):
     def test_extracts_array_from_chatty_reply(self):
-        text = 'Sure!\n["a b", "c d"]\nHope that helps.'
-        self.assertEqual(parse_json_list(text), ["a b", "c d"])
+        self.assertEqual(parse_json_list('Sure!\n["a b", "c d"]\nDone.'), ["a b", "c d"])
 
     def test_returns_empty_on_garbage(self):
         self.assertEqual(parse_json_list("no array here"), [])
@@ -119,12 +188,7 @@ class ModelReplyParsing(unittest.TestCase):
 
 class ModelSelection(unittest.TestCase):
     def test_rejects_non_chat_models(self):
-        for name in [
-            "text-embedding-nomic-embed-text-v1.5",
-            "bge-m3",
-            "jina-reranker-v2",
-            "whisper-large-v3",
-        ]:
+        for name in ["text-embedding-nomic-embed-text-v1.5", "bge-m3", "jina-reranker-v2", "whisper-large-v3"]:
             self.assertTrue(is_embedding_model(name), name)
 
     def test_accepts_chat_models(self):

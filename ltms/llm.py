@@ -50,6 +50,10 @@ class LocalModel:
         self._resolved: str = config.name
 
     @property
+    def resolved_name(self) -> str:
+        return self._resolved or self.config.name or "(unset)"
+
+    @property
     def openai_base(self) -> str:
         """LM Studio users paste the url with or without /v1; accept both."""
         return self.base_url if self.base_url.endswith("/v1") else f"{self.base_url}/v1"

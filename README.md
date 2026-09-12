@@ -6,7 +6,7 @@ Web research for coding agents, run entirely on your own machine. Your agent
 spends ~30 tokens asking for research; local models do the reading.
 
 ```bash
-ltms "how does postgres WAL replication handle network partitions"
+ltms research.md
 ```
 
 ```
@@ -30,9 +30,9 @@ and argue on your hardware; only a compact sourced report crosses back.
 ## How it works
 
 ```
-  ltms "topic"
+  ltms research.md
       │
-      ├─ plan     a local model writes the search queries
+      ├─ plan     your queries, read from the brief
       ├─ search   parallel SearXNG queries
       ├─ filter   dedupe, drop noise, cap per domain     (no LLM, free)
       ├─ read     fetch pages, extract per-page evidence  ← phase 1
@@ -40,6 +40,37 @@ and argue on your hardware; only a compact sourced report crosses back.
       ├─ debate   role agents argue over the same pool    ← phase 2
       └─ write    one editor produces a plain report      ← phase 2
 ```
+
+## Write the brief
+
+The calling agent already knows what it is looking for and which wording will
+find it. It writes that down; ltms does not guess:
+
+```markdown
+# postgres logical replication lag
+
+## queries
+- postgres logical replication lag causes
+- postgres wal sender bottleneck high write volume
+- postgres replication slot disk growth
+
+## questions
+- What makes lag grow under heavy writes?
+- Which metrics identify the bottleneck?
+
+## notes
+Prefer official docs and mailing list threads over blog posts.
+```
+
+Only `## queries` is required. `## questions` steers what the extractor agents
+pull out of each page and what the final report has to answer; `## notes` is
+free-form guidance. A file that is nothing but one search per line also works.
+
+`ltms template` prints a skeleton to fill in.
+
+For a quick one-off, `ltms "some topic"` expands the topic along a few plain
+angles instead — no model, no guessing, and reliably worse than queries you
+write yourself.
 
 While it runs, a small dashboard window shows the agents working. The research
 never depends on that window being open.
@@ -55,9 +86,10 @@ debating and report writing are in progress.
 - **A local model server.** [LM Studio](https://lmstudio.ai) is the easiest:
   install it, download a model, and switch the local server on from the
   Developer tab. [Ollama](https://ollama.com), llama.cpp and vLLM work too.
-- **Docker or Podman** — only for SearXNG, which ltms starts and stops for you.
-  On Windows, Podman needs no desktop app:
-  `winget install RedHat.Podman` then `podman machine init && podman machine start`.
+- **A container engine** — only for SearXNG, which ltms starts and stops for
+  you. On Linux and macOS that is Docker or Podman as usual. On Windows no
+  desktop app is needed: ltms drives Docker Engine inside WSL2, and the
+  installer sets that up.
 
 A 14B class model at 4-bit is a good starting point on 16 GB of VRAM.
 
@@ -75,8 +107,8 @@ From `cmd.exe`:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Samet1771/lesstokenmoresearch/main/install.ps1 | iex"
 ```
 
-It installs whatever is missing — uv, ltms, Podman (with its machine started
-and the SearXNG image pulled), optionally LM Studio — then runs `ltms init`.
+It installs whatever is missing — uv, ltms, WSL2 with Docker Engine inside it
+(plus the SearXNG image), optionally LM Studio — then runs `ltms init`.
 Re-running it is safe; every step checks first.
 
 **Already have the pieces:**
@@ -93,18 +125,24 @@ downloads what is missing. `ltms status` shows the same picture any time.
 
 ## Use it from a coding agent
 
-Add one line to your `CLAUDE.md` / `AGENTS.md`:
+Add this to your `CLAUDE.md` / `AGENTS.md`:
 
 ```markdown
-For web research, run: ltms "<topic>" --effort medium
-Read the report file it prints. Do not fetch pages yourself.
+For web research, do not fetch pages yourself. Instead:
+1. Write a brief: a markdown file with `## queries` (the searches to run) and
+   optionally `## questions` (what you need answered). `ltms template` prints
+   the shape.
+2. Run: ltms <brief.md> --effort medium
+3. Read the report file it prints — all of it, part of it, or none.
 ```
 
 ## Commands
 
 | | |
 |---|---|
-| `ltms "topic"` | run research |
+| `ltms brief.md` | run research from a brief |
+| `ltms "topic"` | quick one-off research |
+| `ltms template` | print a brief skeleton |
 | `ltms init` | interactive setup |
 | `ltms watch [run]` | attach the dashboard to a run |
 | `ltms runs` | list recent runs |
@@ -136,6 +174,13 @@ open_window = true
 SearXNG needs three non-default settings to be usable as an API — JSON output
 on, rate limiter off, secret key set. `ltms` generates that config for you and
 binds the container to `127.0.0.1` only.
+
+On Windows the container runs inside WSL2 and ltms talks to it through
+`wsl -d <distro> -u root -- docker`. WSL2 forwards localhost, so the published
+port is reachable from Windows at the same address. The settings file is
+streamed into the distro and copied into the container rather than bind-mounted
+— host path translation is the least portable part of running containers, and a
+Windows path means nothing inside WSL.
 
 Leaving `name` blank is the normal way to use LM Studio: you pick the model in
 the app, and ltms uses whatever is loaded.

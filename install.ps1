@@ -6,13 +6,13 @@
     Installs, in order, whatever is missing:
         uv          -> runs the tool without touching your system Python
         ltms        -> this project
-        Podman      -> runs SearXNG; no desktop app, terminal only
+        Docker      -> inside WSL2, runs SearXNG; no desktop app needed
         LM Studio   -> optional local model server
 
     Safe to run again: every step checks before it acts.
 
     Environment overrides (set before running):
-        $env:LTMS_SKIP_PODMAN    = "1"   leave containers alone
+        $env:LTMS_SKIP_DOCKER    = "1"   leave containers alone
         $env:LTMS_SKIP_LMSTUDIO  = "1"   do not offer LM Studio
         $env:LTMS_WITH_LMSTUDIO  = "1"   install LM Studio without asking
         $env:LTMS_SOURCE         = "..." install from a path, git url or PyPI name
@@ -168,58 +168,92 @@ function Install-Ltms {
     return $true
 }
 
-function Ensure-Wsl {
-    # Podman's Windows machine runs on WSL2. Enabling the feature itself needs
-    # administrator rights and usually a reboot, so we detect rather than force.
-    if (-not (Have 'wsl')) { return $false }
-    return (Invoke-Native 'wsl' @('--status')).ExitCode -eq 0
+function Get-WslDistro {
+    $result = Invoke-Native 'wsl' @('--list', '--quiet')
+    if ($result.ExitCode -ne 0) { return $null }
+    $names = $result.Output | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    if (-not $names) { return $null }
+    if ($names -contains 'Ubuntu') { return 'Ubuntu' }
+    return $names[0]
+}
+
+function Wsl-Root {
+    param(
+        [Parameter(Mandatory)][string] $Distro,
+        [Parameter(Mandatory)][string] $Script,
+        [switch] $Show,
+        [int] $Tail = 0
+    )
+    return Invoke-Native 'wsl' @('-d', $Distro, '-u', 'root', '--', 'sh', '-lc', $Script) -Show:$Show -Tail $Tail
 }
 
 function Install-Containers {
-    Step 'container runtime'
-    if ($env:LTMS_SKIP_PODMAN -eq '1') { Info 'skipped'; return }
+    Step 'container engine'
+    if ($env:LTMS_SKIP_DOCKER -eq '1') { Info 'skipped'; return }
 
-    if (Have 'docker') {
-        if ((Invoke-Native 'docker' @('info', '--format', '{{.ServerVersion}}')).ExitCode -eq 0) {
-            Ok 'docker is already running'
-            return
-        }
-        Warn 'docker is installed but not running — start it, or let Podman take over'
-    }
-
-    if (-not (Have 'podman')) {
-        if (-not (Winget-Install 'RedHat.Podman' 'Podman')) { return }
-        if (-not (Have 'podman')) {
-            Warn 'Podman installed but not on PATH yet — open a new terminal and rerun this script'
-            return
+    # A native engine on PATH wins; nothing to set up.
+    foreach ($engine in @('docker', 'podman')) {
+        if (Have $engine) {
+            if ((Invoke-Native $engine @('info', '--format', '{{.ServerVersion}}')).ExitCode -eq 0) {
+                Ok "$engine is already running"
+                return
+            }
         }
     }
-    Ok 'podman present'
 
-    if (-not (Ensure-Wsl)) {
-        Warn 'WSL2 is not ready; Podman needs it on Windows'
+    if (-not (Have 'wsl')) {
+        Warn 'WSL is not available on this machine'
         Info 'run this in an ADMIN terminal, reboot, then rerun this script:'
-        Info '    wsl --install --no-distribution'
+        Info '    wsl --install'
         return
     }
 
-    $machines = Invoke-Native 'podman' @('machine', 'list', '--format', '{{.Name}}')
-    if ($machines.ExitCode -ne 0 -or -not ($machines.Output -join '').Trim()) {
-        Info 'creating the podman machine (downloads ~1 GB, first time only)'
-        $init = Invoke-Native 'podman' @('machine', 'init') -Show -Tail 3
-        if ($init.ExitCode -ne 0) { Warn 'podman machine init failed'; return }
+    $env:WSL_UTF8 = '1'
+    if ((Invoke-Native 'wsl' @('--status')).ExitCode -ne 0) {
+        Warn 'WSL2 is not ready'
+        Info 'run this in an ADMIN terminal, reboot, then rerun this script:'
+        Info '    wsl --install'
+        return
     }
 
-    $running = Invoke-Native 'podman' @('machine', 'list', '--format', '{{.Name}} {{.Running}}')
-    if (-not ($running.Output | Where-Object { $_ -match 'true' })) {
-        Info 'starting the podman machine'
-        $start = Invoke-Native 'podman' @('machine', 'start') -Show -Tail 3
-        if ($start.ExitCode -ne 0) { Warn 'podman machine start failed'; return }
+    $distro = Get-WslDistro
+    if (-not $distro) {
+        Info 'no WSL distribution yet — installing Ubuntu (a few minutes)'
+        # --no-launch skips the interactive account setup. ltms only ever talks
+        # to this distro as root, so no ordinary user is needed.
+        $install = Invoke-Native 'wsl' @('--install', '-d', 'Ubuntu', '--no-launch') -Show -Tail 3
+        if ($install.ExitCode -ne 0) {
+            Warn 'could not install the Ubuntu distribution'
+            Info 'try by hand:  wsl --install -d Ubuntu'
+            return
+        }
+        $distro = Get-WslDistro
+        if (-not $distro) { Warn 'Ubuntu did not register; reboot and rerun this script'; return }
     }
-    Ok 'podman machine running'
+    Ok "using WSL distribution: $distro"
+
+    if ((Wsl-Root $distro 'command -v docker').ExitCode -ne 0) {
+        Info 'installing Docker Engine inside the distribution (~2 minutes)'
+        $docker = Wsl-Root $distro 'curl -fsSL https://get.docker.com | sh' -Show -Tail 3
+        if ($docker.ExitCode -ne 0 -or (Wsl-Root $distro 'command -v docker').ExitCode -ne 0) {
+            Warn 'Docker Engine install failed inside WSL'
+            Info "try by hand:  wsl -d $distro -u root -- sh -c 'curl -fsSL https://get.docker.com | sh'"
+            return
+        }
+    }
+    Ok 'docker engine present'
+
+    Wsl-Root $distro 'service docker start' | Out-Null
+    Start-Sleep -Seconds 2
+    if ((Wsl-Root $distro 'docker info >/dev/null 2>&1').ExitCode -ne 0) {
+        Warn 'the docker daemon did not start inside WSL'
+        Info "check with:  wsl -d $distro -u root -- service docker status"
+        return
+    }
+    Ok 'docker daemon running'
 
     Info 'pre-pulling the SearXNG image (~250 MB) so the first search is not a long wait'
-    $pull = Invoke-Native 'podman' @('pull', 'docker.io/searxng/searxng:latest') -Show -Tail 1
+    $pull = Wsl-Root $distro 'docker pull searxng/searxng:latest' -Show -Tail 1
     if ($pull.ExitCode -eq 0) { Ok 'searxng image ready' }
     else { Warn 'image pull failed; ltms will retry on first run' }
 }

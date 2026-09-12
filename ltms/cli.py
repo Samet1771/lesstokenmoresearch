@@ -1,6 +1,8 @@
 """Command line entry point.
 
-    ltms "topic"          run research
+    ltms brief.md         run research from a brief you wrote
+    ltms "topic"          quick one-off, queries expanded from the topic
+    ltms template         print a brief skeleton to fill in
     ltms init             interactive setup
     ltms watch [run]      attach the dashboard to a run
     ltms runs             list recent runs
@@ -22,12 +24,13 @@ from pathlib import Path
 
 from rich.console import Console
 
+from . import brief as brief_mod
 from . import config as config_mod
 from . import docker_mgr, ui, window
 from .pipeline import EFFORTS, run_sync
 from .runs import RunWriter, load_state, new_run_id, resolve_run
 
-SUBCOMMANDS = {"init", "watch", "runs", "stop", "status", "help"}
+SUBCOMMANDS = {"init", "watch", "runs", "stop", "status", "template", "help"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ltms",
         description="Fewer tokens. More search. Local multi-agent web research.",
     )
-    parser.add_argument("topic", nargs="*", help="what to research")
+    parser.add_argument("topic", nargs="*", help="a brief file (.md), or a topic to research")
     parser.add_argument("-e", "--effort", choices=list(EFFORTS), default="medium")
     parser.add_argument("--read", type=int, default=None, help="override how many pages to read")
     parser.add_argument("--no-window", action="store_true", help="do not open a dashboard window")
@@ -45,23 +48,35 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_research(args: argparse.Namespace, console: Console) -> int:
-    topic = " ".join(args.topic).strip()
-    if not topic:
-        console.print("[red]nothing to research[/red]   try:  ltms \"how does WAL work in postgres\"")
+    raw = " ".join(args.topic).strip()
+    if not raw:
+        console.print("[red]nothing to research[/red]")
+        console.print("[dim]  ltms research.md            a brief you wrote[/dim]")
+        console.print("[dim]  ltms \"topic in a few words\"  quick one-off[/dim]")
+        console.print("[dim]  ltms template               print a brief to fill in[/dim]")
         return 2
 
     config = config_mod.load()
     if not config_mod.exists():
         console.print("[dim]no config yet — using defaults. run `ltms init` to set up.[/dim]", highlight=False)
 
-    writer = RunWriter(config.runs_path, new_run_id(topic))
+    try:
+        if brief_mod.looks_like_brief(raw):
+            brief = brief_mod.load(Path(raw))
+        else:
+            brief = brief_mod.from_topic(raw, EFFORTS[args.effort].queries)
+    except brief_mod.BriefError as error:
+        print(f"failed · {error}", file=sys.stderr)
+        return 2
+
+    writer = RunWriter(config.runs_path, new_run_id(brief.topic))
     result: dict = {}
     failure: BaseException | None = None
 
     def work() -> None:
         nonlocal result, failure
         try:
-            result = run_sync(topic, args.effort, config, writer, args.read)
+            result = run_sync(brief, args.effort, config, writer, args.read)
         except BaseException as error:  # noqa: BLE001 - always close the event stream
             failure = error
             writer.note(str(error).splitlines()[0][:120], "error")
@@ -97,6 +112,12 @@ def cmd_research(args: argparse.Namespace, console: Console) -> int:
             f" · {result.get('domains', 0)} domains"
             f" · {result.get('sources_file', '')}"
         )
+    return 0
+
+
+def cmd_template(console: Console) -> int:
+    # Printed raw so an agent can redirect it straight into a file.
+    sys.stdout.write(brief_mod.TEMPLATE)
     return 0
 
 
@@ -159,11 +180,11 @@ def cmd_status(console: Console) -> int:
 
     runtime = docker_mgr.find_runtime(config.search.runtime)
     if runtime is None:
-        console.print("             [yellow]no docker/podman found[/yellow]")
+        console.print("             [yellow]no container engine found[/yellow]")
     else:
         ready, detail = docker_mgr.runtime_ready(runtime)
         mark = "[green]ready[/green]" if ready else f"[yellow]not running[/yellow] [dim]{detail[:60]}[/dim]"
-        console.print(f"             {runtime.name} {mark}")
+        console.print(f"             {runtime.label} {mark}")
         if ready:
             state = docker_mgr.container_state(runtime)
             url = docker_mgr.container_url(runtime) if state == "running" else None
@@ -226,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_stop(console)
         if command == "status":
             return cmd_status(console)
+        if command == "template":
+            return cmd_template(console)
 
     args = build_parser().parse_args(argv)
     return cmd_research(args, console)
