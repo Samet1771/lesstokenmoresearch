@@ -227,20 +227,13 @@ class ReportDestination(unittest.TestCase):
             wanted.touch()
             self.assertEqual(publish("body", wanted).name, "x.md")
 
-    def test_a_person_gets_a_folder_in_their_documents(self):
-        from ltms.config import Config, documents_dir
+    def test_a_person_gets_a_reports_folder_in_the_ltms_home(self):
+        from ltms.config import Config, config_dir
 
-        self.assertEqual(Config().reports_path, documents_dir() / "ltms")
+        self.assertEqual(Config().reports_path, config_dir() / "reports")
 
     def test_the_reports_folder_can_be_moved(self):
         from ltms.config import Config
 
         self.assertEqual(str(Config(reports_dir="/tmp/elsewhere").reports_path).replace("\\", "/"),
                          "/tmp/elsewhere")
-
-    def test_documents_is_an_absolute_existing_shaped_path(self):
-        from ltms.config import documents_dir
-
-        found = documents_dir()
-        self.assertTrue(found.is_absolute())
-        self.assertEqual(found.name.lower(), "documents")

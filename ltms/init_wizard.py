@@ -13,7 +13,10 @@ from rich.prompt import Confirm, Prompt
 from rich.text import Text
 
 from . import docker_mgr
-from .config import Config, ModelConfig, SearchConfig, UiConfig, config_path, load, save
+from .config import (
+    Config, ModelConfig, SearchConfig, UiConfig,
+    config_dir, config_path, load, migrate_legacy, save,
+)
 from .llm import detect_servers, is_embedding_model
 
 BANNER = r"""
@@ -47,10 +50,13 @@ def run_wizard(console: Console | None = None) -> int:
         return 2
 
     console.print(Text(BANNER, style="cyan"))
+    for moved in migrate_legacy():
+        _info(console, f"moved what was in {moved}")
     existing = load()
+    _info(console, f"everything ltms keeps lives in {config_dir()}")
     if config_path().exists():
-        _info(console, f"updating existing config at {config_path()}")
-        console.print()
+        _info(console, "updating the config already there")
+    console.print()
 
     # ---------------------------------------------------------------- search
     console.rule("[bold]search[/bold]", style="grey35")
@@ -198,7 +204,10 @@ def run_wizard(console: Console | None = None) -> int:
     open_window = Confirm.ask("  open a dashboard window", default=existing.ui.open_window, console=console)
     ui = UiConfig(open_window=open_window, theme=existing.ui.theme)
 
-    config = Config(search=search, model=model, ui=ui, runs_dir=existing.runs_dir)
+    config = Config(
+        search=search, model=model, ui=ui,
+        runs_dir=existing.runs_dir, reports_dir=existing.reports_dir,
+    )
     path = save(config)
 
     console.print()

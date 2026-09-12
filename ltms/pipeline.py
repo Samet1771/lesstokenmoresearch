@@ -46,7 +46,7 @@ def publish(body: str, destination: Path) -> Path:
     """Put the report where it was asked for, without overwriting a neighbour.
 
     An agent names its own file and expects exactly that path. A person gets a
-    readable name in their Documents folder, and a second run on the same topic
+    readable name in their reports folder, and a second run on the same topic
     should sit beside the first rather than replace it.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)

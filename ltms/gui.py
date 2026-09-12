@@ -665,8 +665,9 @@ class Console(App):
     @work(thread=True, exclusive=True)
     def show_status(self) -> None:
         lines = [
-            f"config     [dim]{config_mod.config_path()}[/dim]",
+            f"folder     [dim]{config_mod.config_dir()}[/dim]",
             f"runs       [dim]{self.config.runs_path}[/dim]",
+            f"reports    [dim]{self.config.reports_path}[/dim]",
             f"search     {self.config.search.mode}",
         ]
         runtime = docker_mgr.find_runtime(self.config.search.runtime)

@@ -146,26 +146,74 @@ function Install-Uv {
     return $false
 }
 
+<#
+    Everything ltms is and everything it keeps goes in one folder:
+
+        %USERPROFILE%\ltms\
+            bin\ltms.cmd      what PATH points at
+            app\              the virtual environment holding the program
+            config.toml       written by `ltms init`
+            runs\  reports\  searxng\
+
+    Deliberately not `uv tool install`: that scatters the program across
+    %APPDATA%\uv and ~\.local\bin, which is three places to look and nothing
+    to delete when someone wants it gone. Here, removing the folder and one
+    PATH entry removes ltms completely.
+#>
 function Install-Ltms {
     Step 'ltms'
+    $root = Join-Path $env:USERPROFILE 'ltms'
+    $app = Join-Path $root 'app'
+    $bin = Join-Path $root 'bin'
     $source = Resolve-Source
-    Info "installing from $source"
+    Info "installing into $root"
 
-    $result = Invoke-Native 'uv' @('tool', 'install', '--force', $source) -Show -Tail 6
+    New-Item -ItemType Directory -Force -Path $bin | Out-Null
+
+    # uv fetches a Python of its own if the machine has none, so this works on
+    # a bare Windows install.
+    $result = Invoke-Native 'uv' @('venv', '--python', '3.12', $app) -Show -Tail 3
+    if ($result.ExitCode -ne 0) {
+        Warn 'could not create the ltms environment'
+        return $false
+    }
+
+    $python = Join-Path $app 'Scripts\python.exe'
+    Info "installing from $source"
+    $result = Invoke-Native 'uv' @('pip', 'install', '--python', $python, '--upgrade', $source) -Show -Tail 6
     if ($result.ExitCode -ne 0) {
         Warn 'could not install ltms'
         if ($source -like 'git+*') {
             Info 'if the repository is private or the name is wrong, install from a local clone:'
             Info '    git clone https://github.com/Samet1771/lesstokenmoresearch'
-            Info '    uv tool install --force .\lesstokenmoresearch'
+            Info "    uv pip install --python `"$python`" .\lesstokenmoresearch"
         }
         return $false
     }
 
-    Invoke-Native 'uv' @('tool', 'update-shell') | Out-Null
-    Refresh-Path
-    if (Have 'ltms') { Ok 'ltms is on PATH' } else { Warn 'installed, but PATH needs a new terminal' }
+    # A one-line shim rather than the venv's own Scripts folder: that folder
+    # also holds python.exe and pip.exe, and putting those on someone's PATH
+    # to ship one command is rude.
+    $shim = @"
+@echo off
+"%~dp0..\app\Scripts\ltms.exe" %*
+"@
+    Set-Content -Path (Join-Path $bin 'ltms.cmd') -Value $shim -Encoding ascii
+
+    Add-ToUserPath $bin
+    if (Have 'ltms') { Ok "ltms is on PATH  ($root)" }
+    else { Warn 'installed, but PATH needs a new terminal' }
     return $true
+}
+
+function Add-ToUserPath($directory) {
+    $current = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $entries = @($current -split ';' | Where-Object { $_ })
+    if ($entries -notcontains $directory) {
+        [Environment]::SetEnvironmentVariable('Path', (@($entries + $directory) -join ';'), 'User')
+        Info "added $directory to your PATH"
+    }
+    if (($env:Path -split ';') -notcontains $directory) { $env:Path = "$env:Path;$directory" }
 }
 
 function Get-WslDistro {
@@ -292,6 +340,10 @@ function Finish {
         Say '  some steps need you:' Yellow
         foreach ($warning in $script:Warnings) { Say "    - $warning" Yellow }
     }
+
+    Write-Host ''
+    Say "  everything ltms installs and writes lives in $(Join-Path $env:USERPROFILE 'ltms')" DarkGray
+    Say '  delete that folder and ltms is gone.' DarkGray
 
     Write-Host ''
     Say '  next' DarkGray

@@ -212,9 +212,10 @@ def cmd_stop(console: Console) -> int:
 def cmd_status(console: Console) -> int:
     config = config_mod.load()
     console.print()
-    console.print(f"  config     [dim]{config_mod.config_path()}[/dim]"
-                  + ("" if config_mod.exists() else "  [yellow](not created — run `ltms init`)[/yellow]"))
+    console.print(f"  folder     [dim]{config_mod.config_dir()}[/dim]"
+                  + ("" if config_mod.exists() else "  [yellow](no config yet — run `ltms init`)[/yellow]"))
     console.print(f"  runs       [dim]{config.runs_path}[/dim]")
+    console.print(f"  reports    [dim]{config.reports_path}[/dim]")
     console.print()
     console.print(f"  search     mode [bold]{config.search.mode}[/bold]"
                   + (f"  url {config.search.url}" if config.search.url else ""))
@@ -270,6 +271,11 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     _force_utf8()
     console = Console(stderr=False)
+
+    # An install from before everything lived in one folder. Move it once,
+    # quietly enough not to interrupt a run, loudly enough to be findable.
+    for moved in config_mod.migrate_legacy():
+        console.print(f"[dim]moved {moved} into {config_mod.config_dir()}[/dim]")
 
     if argv and argv[0] in SUBCOMMANDS:
         command, rest = argv[0], argv[1:]

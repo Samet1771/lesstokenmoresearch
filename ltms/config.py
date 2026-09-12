@@ -32,62 +32,77 @@ KNOWN_SERVERS: list[tuple[str, str, str]] = [
 
 
 def config_dir() -> Path:
-    """Per-user config directory, following platform convention."""
+    """Everything ltms owns, in one folder in the user's home directory.
+
+    One place, on every platform: ~/ltms holds the config, the runs, the
+    reports and the generated SearXNG settings. The platform-correct answer is
+    three separate hidden folders -- AppData for config, somewhere else for
+    data, Documents for output -- and that makes the tool impossible to look
+    at, back up or delete. A person who wants to know what ltms put on their
+    machine should be able to open one folder and see all of it.
+    """
     override = os.environ.get("LTMS_HOME")
     if override:
         return Path(override).expanduser()
-    if os.name == "nt":
-        base = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
-        return Path(base) / APP_NAME
-    base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    return Path(base) / APP_NAME
+    return Path.home() / APP_NAME
 
 
 def config_path() -> Path:
     return config_dir() / "config.toml"
 
 
-def documents_dir() -> Path:
-    """The user's Documents folder, as the system actually defines it.
+def legacy_moves() -> list[tuple[Path, Path]]:
+    """Folders an older ltms left elsewhere, and where they belong now.
 
-    On Windows this is a shell known folder, not necessarily ~/Documents --
-    OneDrive backup moves it, and guessing lands reports somewhere the person
-    will never look.
+    ltms used to follow platform convention: config in AppData or ~/.config,
+    reports in Documents. Each move is offered only while its destination is
+    still absent, so nothing can overwrite a folder that is already in use.
     """
+    if os.environ.get("LTMS_HOME"):
+        return []
+
+    home = config_dir()
+    moves: list[tuple[Path, Path]] = []
+
     if os.name == "nt":
-        try:
-            import ctypes
-            import ctypes.wintypes as wintypes
-
-            class _Guid(ctypes.Structure):
-                _fields_ = [
-                    ("d1", wintypes.DWORD),
-                    ("d2", wintypes.WORD),
-                    ("d3", wintypes.WORD),
-                    ("d4", ctypes.c_byte * 8),
-                ]
-
-            # FOLDERID_Documents
-            guid = _Guid(0xFDD39AD0, 0x238F, 0x46AF, (ctypes.c_byte * 8)(*b"\xad\xb4\x6c\x85\x48\x03\x69\xc7"))
-            buffer = ctypes.c_wchar_p()
-            if ctypes.windll.shell32.SHGetKnownFolderPath(
-                ctypes.byref(guid), 0, None, ctypes.byref(buffer)
-            ) == 0 and buffer.value:
-                return Path(buffer.value)
-        except Exception:  # noqa: BLE001 - any failure just means "guess"
-            pass
+        base = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
     else:
-        # XDG records a translated or relocated Documents folder here.
-        user_dirs = Path.home() / ".config" / "user-dirs.dirs"
-        if user_dirs.exists():
-            try:
-                for line in user_dirs.read_text(encoding="utf-8").splitlines():
-                    if line.startswith("XDG_DOCUMENTS_DIR="):
-                        value = line.split("=", 1)[1].strip().strip('"')
-                        return Path(value.replace("$HOME", str(Path.home())))
-            except OSError:
-                pass
-    return Path.home() / "Documents"
+        base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+    old_config = Path(base) / APP_NAME
+    if old_config.is_dir() and not home.exists():
+        moves.append((old_config, home))
+
+    reports = home / "reports"
+    if not reports.exists():
+        # Where Documents usually is. A redirected one is missed, and the cost
+        # of missing it is a stale folder holding old reports -- not worth the
+        # shell API call to be sure.
+        for candidate in (
+            Path.home() / "Documents" / APP_NAME,
+            Path.home() / "OneDrive" / "Documents" / APP_NAME,
+        ):
+            if candidate.is_dir():
+                moves.append((candidate, reports))
+                break
+
+    return moves
+
+
+def migrate_legacy() -> list[Path]:
+    """Pull an older install into ~/ltms. Returns the folders that moved.
+
+    Best effort: a move that fails leaves that folder where it is, which is
+    an old copy left behind rather than anything broken.
+    """
+    moved: list[Path] = []
+    for old, new in legacy_moves():
+        try:
+            new.parent.mkdir(parents=True, exist_ok=True)
+            old.rename(new)
+        except OSError:
+            continue
+        moved.append(old)
+    return moved
 
 
 @dataclass
@@ -156,7 +171,8 @@ class Config:
     ui: UiConfig = field(default_factory=UiConfig)
     runs_dir: str = ""
     # Where reports land when a person asked for one. An agent names its own
-    # destination; a person should not have to go digging in an app folder.
+    # destination with -o; a person gets a readable name next to everything
+    # else ltms keeps.
     reports_dir: str = ""
 
     @property
@@ -165,7 +181,7 @@ class Config:
 
     @property
     def reports_path(self) -> Path:
-        return Path(self.reports_dir).expanduser() if self.reports_dir else documents_dir() / "ltms"
+        return Path(self.reports_dir).expanduser() if self.reports_dir else config_dir() / "reports"
 
 
 def _coerce(section_cls: Any, raw: dict[str, Any]) -> Any:

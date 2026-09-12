@@ -63,26 +63,41 @@ An agent names its own file with `-o` and gets exactly that path. Without `-o`
 the report stays in the run directory and the printed line points at it — an
 agent reads a path, not a folder.
 
-A person working in the console gets `Documents/ltms/<topic>.md`, under a name
-they can read, because nobody should have to go digging in an app data folder
-for their own research. A second run on the same topic lands beside the first
-rather than replacing it.
+A person working in the console gets `~/ltms/reports/<topic>.md`, under a name
+they can read. A second run on the same topic lands beside the first rather
+than replacing it.
 
 Either way the run directory keeps its own copy, next to the evidence that
-produced it. `reports_dir` in the config moves the Documents folder if you
-want it somewhere else.
+produced it. `reports_dir` in the config moves that folder if you want it
+somewhere else.
 
-A run leaves everything behind:
+## One folder
+
+Everything ltms is, and everything it writes, lives in `~/ltms`:
 
 ```
-runs/<id>/
-  brief.json        what was asked
-  sources.json      every candidate the search found
-  extracts/         one markdown note per page read
-  findings.json     the ranked evidence
-  report.md         the thing you read
-  progress.jsonl    the event stream the dashboard replays
+~/ltms/
+  bin/ltms.cmd      what PATH points at
+  app/              the program
+  config.toml       written by `ltms init`
+  reports/          your reports
+  searxng/          the generated SearXNG settings
+  runs/<id>/
+    brief.json        what was asked
+    sources.json      every candidate the search found
+    extracts/         one markdown note per page read
+    findings.json     the ranked evidence
+    report.md         the thing you read
+    progress.jsonl    the event stream the dashboard replays
 ```
+
+The platform-correct answer is three separate hidden folders — AppData for the
+config, somewhere else for the data, Documents for the output — and that makes
+a tool impossible to look at, back up, or delete. Deleting `~/ltms` and one
+PATH entry removes ltms completely.
+
+`LTMS_HOME` moves the whole folder. An install from an older version is pulled
+into the new one the first time you run it, and ltms says so when it does.
 
 ## Write the brief
 
@@ -137,7 +152,7 @@ there; the transcript fills in as it happens rather than arriving at the end.
  14:22:34  !  the reading model spent 76% of its output thinking
  14:22:34  ✓  read    5 pages read · 19 facts
  14:23:59  ◆  done    5 sources read · 19 facts · 360 tokens
-              ~/.config/ltms/runs/20260912-141931-sqlite-wal/report.md
+              ~/ltms/runs/20260912-141931-sqlite-wal/report.md
 
  ⠴ read     ━━━━━━━━━━╸───────  7/12
    scout-1  ◉ reading   sqlite.org/wal.html
@@ -208,15 +223,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 ```
 
 It installs whatever is missing — uv, ltms, WSL2 with Docker Engine inside it
-(plus the SearXNG image), optionally LM Studio — then runs `ltms init`.
+(plus the SearXNG image), optionally LM Studio — then runs `ltms init`. All of
+it goes into `%USERPROFILE%\ltms`, and `~\ltms\bin` is added to your PATH.
 Re-running it is safe; every step checks first.
 
-**Already have the pieces:**
+**By hand, anywhere:**
 
 ```bash
-uv tool install git+https://github.com/Samet1771/lesstokenmoresearch
-ltms init
+uv venv ~/ltms/app
+uv pip install --python ~/ltms/app git+https://github.com/Samet1771/lesstokenmoresearch
+~/ltms/app/bin/ltms init
 ```
+
+Put `~/ltms/app/bin` (Windows: `~\ltms\app\Scripts`) on your PATH, or use
+`uv tool install git+https://github.com/Samet1771/lesstokenmoresearch` if you
+would rather uv managed it — the data folder is `~/ltms` either way.
 
 (Not on PyPI yet — `uv tool install lesstokenmoresearch` will work once it is.)
 
@@ -274,7 +295,7 @@ parallel = 4
 [ui]
 open_window = true
 
-# reports_dir = "~/research"   # default: Documents/ltms
+# reports_dir = "~/research"   # default: ~/ltms/reports
 ```
 
 SearXNG needs three non-default settings to be usable as an API — JSON output

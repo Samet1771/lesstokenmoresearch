@@ -1,7 +1,11 @@
 """Tests for the pure pieces: brief parsing, URL handling, triage, event replay."""
 
+import os
+import tempfile
 import textwrap
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from ltms.brief import BriefError, from_topic, looks_like_brief, missing_brief, parse
 from ltms.config import ModelConfig
@@ -226,9 +230,6 @@ class ModelSelection(unittest.TestCase):
             self.assertFalse(is_embedding_model(name), name)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class GuiModelPicking(unittest.TestCase):
     """The pure helpers behind the two model dropdowns."""
@@ -282,3 +283,85 @@ class ModelRoles(unittest.TestCase):
     def test_no_fast_model_means_one_model_for_everything(self):
         config = ModelConfig(name="only")
         self.assertEqual(config.for_role("fast").name, "only")
+
+class HomeFolder(unittest.TestCase):
+    """One folder holds everything ltms owns, and it is in the user's home."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "user"
+        self.home.mkdir()
+        self.env = mock.patch.dict(os.environ, {"APPDATA": str(self.home / "AppData" / "Roaming")})
+        self.env.start()
+        os.environ.pop("LTMS_HOME", None)
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        self.home_patch = mock.patch.object(Path, "home", staticmethod(lambda: self.home))
+        self.home_patch.start()
+
+    def tearDown(self):
+        self.home_patch.stop()
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def test_config_runs_and_reports_all_sit_in_one_folder(self):
+        from ltms.config import Config, config_dir, config_path
+
+        root = config_dir()
+        self.assertEqual(root, self.home / "ltms")
+        for path in (config_path(), Config().runs_path, Config().reports_path):
+            self.assertEqual(path.parent, root, path)
+
+    def test_ltms_home_still_overrides_everything(self):
+        from ltms.config import config_dir
+
+        with mock.patch.dict(os.environ, {"LTMS_HOME": str(self.home / "elsewhere")}):
+            self.assertEqual(config_dir(), self.home / "elsewhere")
+
+    def test_an_old_appdata_install_is_moved_once(self):
+        from ltms.config import config_dir, migrate_legacy
+
+        old = self.home / "AppData" / "Roaming" / "ltms"
+        (old / "runs").mkdir(parents=True)
+        (old / "config.toml").write_text("x = 1", encoding="utf-8")
+
+        self.assertEqual(migrate_legacy(), [old])
+        self.assertTrue((config_dir() / "config.toml").exists())
+        self.assertTrue((config_dir() / "runs").is_dir())
+        self.assertFalse(old.exists())
+        # Second call has nothing left to do.
+        self.assertEqual(migrate_legacy(), [])
+
+    def test_reports_come_back_from_the_documents_folder(self):
+        from ltms.config import Config, migrate_legacy
+
+        old = self.home / "Documents" / "ltms"
+        old.mkdir(parents=True)
+        (old / "geckos.md").write_text("# geckos", encoding="utf-8")
+
+        self.assertIn(old, migrate_legacy())
+        self.assertEqual((Config().reports_path / "geckos.md").read_text(encoding="utf-8"), "# geckos")
+        self.assertFalse(old.exists())
+
+    def test_an_existing_home_is_never_overwritten_by_the_old_one(self):
+        from ltms.config import config_dir, migrate_legacy
+
+        old = self.home / "AppData" / "Roaming" / "ltms"
+        old.mkdir(parents=True)
+        (old / "config.toml").write_text("old = 1", encoding="utf-8")
+        config_dir().mkdir(parents=True)
+        (config_dir() / "config.toml").write_text("new = 1", encoding="utf-8")
+
+        self.assertEqual(migrate_legacy(), [])
+        self.assertEqual((config_dir() / "config.toml").read_text(encoding="utf-8"), "new = 1")
+        self.assertTrue(old.exists())
+
+    def test_a_custom_home_is_left_alone(self):
+        from ltms.config import migrate_legacy
+
+        (self.home / "AppData" / "Roaming" / "ltms").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"LTMS_HOME": str(self.home / "elsewhere")}):
+            self.assertEqual(migrate_legacy(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
