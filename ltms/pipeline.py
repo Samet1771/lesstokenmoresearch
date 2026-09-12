@@ -106,7 +106,7 @@ async def run(
     # ---------------------------------------------------------------- search
     writer.stage("search", "run")
     with docker_mgr.searxng(config, report=lambda text, level: writer.note(text, level)) as base_url:
-        backend = SearxngBackend(base_url, concurrency=min(6, len(queries)))
+        backend = SearxngBackend(base_url, concurrency=2, categories=config.search.categories)
         per_query = max(6, min(20, preset.candidates // max(1, len(queries)) + 4))
 
         done = 0

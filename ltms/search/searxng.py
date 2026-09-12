@@ -12,10 +12,20 @@ from .base import SearchResult
 class SearxngBackend:
     name = "searxng"
 
-    def __init__(self, base_url: str, timeout: float = 25.0, concurrency: int = 6) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 25.0,
+        concurrency: int = 2,
+        categories: str = "general,it",
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._gate = asyncio.Semaphore(concurrency)
+        self.categories = categories
+        # Deliberately low. Firing a dozen queries at once is what trips the
+        # CAPTCHA on the public engines; a run spends minutes reading pages, so
+        # a few extra seconds spent searching politely costs nothing.
+        self._gate = asyncio.Semaphore(max(1, concurrency))
 
     async def search_with_engines(
         self, query: str, limit: int, client: httpx.AsyncClient | None = None
@@ -47,7 +57,7 @@ class SearxngBackend:
                     params={
                         "q": query,
                         "format": "json",
-                        "categories": "general",
+                        "categories": self.categories,
                         "language": "all",
                         "safesearch": "0",
                     },
@@ -95,7 +105,9 @@ class SearxngBackend:
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
 
-            async def one(query: str) -> None:
+            async def one(index: int, query: str) -> None:
+                # Stagger the openings so the engines see a person, not a burst.
+                await asyncio.sleep(min(index, 6) * 0.35)
                 try:
                     found, trouble = await self.search_with_engines(query, per_query, client=client)
                     collected.extend(found)
@@ -108,6 +120,6 @@ class SearxngBackend:
                     if on_done:
                         on_done(query, 0, message)
 
-            await asyncio.gather(*(one(query) for query in queries))
+            await asyncio.gather(*(one(i, q) for i, q in enumerate(queries)))
 
         return collected, warnings, engines

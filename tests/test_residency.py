@@ -84,5 +84,70 @@ class ReleaseRules(unittest.TestCase):
         self.assertEqual(release(ModelConfig(name=""), ModelConfig(name="big")), "")
 
 
+
+class GeneratedSearxngSettings(unittest.TestCase):
+    """The stock config enables three web engines, two of which rate-limit
+    hard by IP. Ours adds independent indexes so one block is not fatal."""
+
+    def setUp(self) -> None:
+        import os
+        import tempfile
+
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+        self._saved = os.environ.get("LTMS_HOME")
+        os.environ["LTMS_HOME"] = self._home.name
+
+        def restore():
+            if self._saved is None:
+                os.environ.pop("LTMS_HOME", None)
+            else:
+                os.environ["LTMS_HOME"] = self._saved
+
+        self.addCleanup(restore)
+
+    def settings(self) -> str:
+        from ltms.docker_mgr import ensure_settings
+
+        return ensure_settings().read_text(encoding="utf-8")
+
+    def test_json_output_and_no_limiter(self):
+        text = self.settings()
+        self.assertIn("- json", text)
+        self.assertIn("limiter: false", text)
+        self.assertIn("secret_key:", text)
+
+    def test_extra_engines_are_enabled(self):
+        from ltms.docker_mgr import EXTRA_ENGINES
+
+        text = self.settings()
+        for engine in EXTRA_ENGINES:
+            self.assertIn(f"- name: {engine}", text, engine)
+
+    def test_it_carries_a_version(self):
+        from ltms.docker_mgr import SETTINGS_VERSION, VERSION_MARKER
+
+        self.assertIn(f"{VERSION_MARKER} {SETTINGS_VERSION}", self.settings())
+
+    def test_a_current_file_is_left_alone(self):
+        from ltms.docker_mgr import ensure_settings
+
+        path = ensure_settings()
+        path.write_text(path.read_text(encoding="utf-8") + "\n# my own edit\n", encoding="utf-8")
+        self.assertIn("# my own edit", ensure_settings().read_text(encoding="utf-8"))
+
+    def test_an_outdated_file_is_rewritten_but_keeps_its_key(self):
+        from ltms.docker_mgr import ensure_settings, settings_dir
+
+        path = settings_dir()
+        path.mkdir(parents=True, exist_ok=True)
+        old = path / "settings.yml"
+        old.write_text(
+            "# ltms-settings-version: 1\nserver:\n  secret_key: \"keepme\"\n", encoding="utf-8"
+        )
+        text = ensure_settings().read_text(encoding="utf-8")
+        self.assertIn('secret_key: "keepme"', text)
+        self.assertIn("- name: mojeek", text)
+
 if __name__ == "__main__":
     unittest.main()

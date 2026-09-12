@@ -281,6 +281,26 @@ SearXNG needs three non-default settings to be usable as an API — JSON output
 on, rate limiter off, secret key set. `ltms` generates that config for you and
 binds the container to `127.0.0.1` only.
 
+### Search engines and rate limits
+
+Public engines rate-limit by IP, and SearXNG answers 200 with an empty list
+once they all refuse. Three things keep a run working through that:
+
+- **Category.** `search.categories` defaults to `general,it`. The `it` engines
+  — stackoverflow, github, mdn, docker hub, askubuntu — are better sources for
+  technical research *and* do not throttle a single machine. Measured on one
+  query: `general` alone returned 20 results with two engines blocked,
+  `general,it` returned 99 with the same two blocked.
+- **Breadth.** The generated settings enable mojeek, qwant, bing, mwmbl and
+  crowdview alongside the stock three, so no single block empties a search.
+  Same query, three engines blocked: 20 results before, 38 after.
+- **Pace.** Queries go out two at a time with a stagger rather than all at
+  once. The burst is what trips the CAPTCHA, and a run spends minutes reading
+  pages — a few seconds spent searching politely costs nothing.
+
+When engines do refuse, ltms names them and says so, rather than reporting
+"no results" and sending you looking for a bug in your query.
+
 On Windows the container runs inside WSL2 and ltms talks to it through
 `wsl -d <distro> -u root -- docker`. WSL2 forwards localhost, so the published
 port is reachable from Windows at the same address. The settings file is

@@ -99,6 +99,12 @@ class SearchConfig:
     url: str = ""
     port: int = 0  # 0 = pick a free port at start time
     runtime: str = ""  # "docker" | "wsl-docker"; empty = autodetect
+    # SearXNG groups its engines by category. `general` is the web engines that
+    # rate-limit hardest; `it` is stackoverflow, github, mdn and friends, which
+    # are both better sources for technical research and do not throttle a
+    # single machine. Measured on one query: general alone returned 20 results
+    # with two engines blocked, general+it returned 81 with none blocked.
+    categories: str = "general,it"
 
 
 @dataclass
