@@ -55,7 +55,7 @@ class SearchConfig:
     mode: str = "ephemeral"
     url: str = ""
     port: int = 0  # 0 = pick a free port at start time
-    runtime: str = ""  # "docker" | "podman" | "wsl-docker"; empty = autodetect
+    runtime: str = ""  # "docker" | "wsl-docker"; empty = autodetect
 
 
 @dataclass

@@ -54,7 +54,7 @@ class Runtime:
     native install, a `wsl.exe -d <distro> -u root --` incantation otherwise.
     """
 
-    name: str  # docker | podman | wsl-docker
+    name: str  # docker | wsl-docker
     binary: str
     prefix: list[str] = field(default_factory=list)
     distro: str = ""
@@ -146,11 +146,10 @@ def _wsl_runtime(distro: str) -> Runtime:
 
 def find_runtime(preferred: str = "") -> Runtime | None:
     """Native engine first, then Docker inside a WSL distribution."""
-    names = [preferred] if preferred and preferred != "wsl-docker" else ["docker", "podman"]
-    for name in names:
-        found = shutil.which(name)
+    if preferred != "wsl-docker":
+        found = shutil.which("docker")
         if found:
-            return Runtime(name=name, binary=found)
+            return Runtime(name="docker", binary=found)
     for path in WINDOWS_DOCKER_PATHS:
         if Path(path).exists():
             return Runtime(name="docker", binary=path)
@@ -418,7 +417,7 @@ NO_RUNTIME_HELP = (
     "             wsl --install -d Ubuntu\n"
     "             wsl -d Ubuntu -u root -- sh -c 'curl -fsSL https://get.docker.com | sh'\n"
     "  Linux:   https://docs.docker.com/engine/install/\n"
-    "  macOS:   brew install podman  (or Docker Desktop)\n"
+    "  macOS:   https://docs.docker.com/desktop/setup/install/mac-install/\n"
     "Already run SearXNG somewhere? `ltms init` -> 'external'."
 )
 

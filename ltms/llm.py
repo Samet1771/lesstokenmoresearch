@@ -37,6 +37,10 @@ class Reply:
     text: str
     prompt_tokens: int = 0
     output_tokens: int = 0
+    # Tokens the model spent thinking before answering. On a local box this is
+    # pure latency, so the pipeline warns when a reasoning model is doing bulk
+    # work that a plain instruct model would finish in half the time.
+    reasoning_tokens: int = 0
 
 
 def strip_thinking(text: str) -> str:
@@ -119,14 +123,20 @@ class LocalModel:
         temperature: float = 0.2,
         client: httpx.AsyncClient | None = None,
         timeout: float = 180.0,
+        accept_reasoning: bool = False,
     ) -> Reply:
+        """accept_reasoning: salvage the answer from the thinking when `content`
+        comes back empty. Right for structured output, where the JSON is often
+        sitting in the scratchpad. Wrong for prose: a model's reasoning is its
+        working out, not its answer, and returning it produces a "report" that
+        is a transcript of deliberation."""
         owns = client is None
         client = client or httpx.AsyncClient(timeout=timeout)
         try:
             await self.ensure_model(client)
             if self.config.provider == "ollama":
                 return await self._ollama(client, system, user, max_tokens, temperature)
-            return await self._openai(client, system, user, max_tokens, temperature)
+            return await self._openai(client, system, user, max_tokens, temperature, accept_reasoning)
         finally:
             if owns:
                 await client.aclose()
@@ -163,7 +173,8 @@ class LocalModel:
         )
 
     async def _openai(
-        self, client: httpx.AsyncClient, system: str, user: str, max_tokens: int, temperature: float
+        self, client: httpx.AsyncClient, system: str, user: str, max_tokens: int,
+        temperature: float, accept_reasoning: bool = False,
     ) -> Reply:
         base = self.openai_base
         payload: dict = {
@@ -191,24 +202,26 @@ class LocalModel:
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         text = strip_thinking(message.get("content") or "")
+        reasoning = message.get("reasoning_content") or ""
 
         # A reasoning model that could not be talked out of thinking returns its
-        # whole answer under `reasoning_content` with an empty `content`. The
-        # answer is usually still in there, so look rather than fail.
-        if not text:
-            text = strip_thinking(message.get("reasoning_content") or "")
+        # whole answer under `reasoning_content` with an empty `content`.
+        if not text and reasoning and accept_reasoning:
+            text = strip_thinking(reasoning)
 
-        if not text and choice.get("finish_reason") == "length":
+        if not text:
+            spent = " and ran out of room" if choice.get("finish_reason") == "length" else ""
             raise ModelError(
-                f"{self._resolved} spent its entire {max_tokens}-token budget thinking and "
-                "produced no answer. Use a non-reasoning model for this work, or disable "
-                "thinking in the server."
+                f"{self._resolved} produced no answer{spent} — it spent the whole "
+                f"{max_tokens}-token budget thinking. Give it more room, or use a model "
+                "that does not reason for this step."
             )
 
         return Reply(
             text=text,
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
+            reasoning_tokens=estimate_tokens(reasoning) if reasoning else 0,
         )
 
 

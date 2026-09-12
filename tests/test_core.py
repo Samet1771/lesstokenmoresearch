@@ -3,7 +3,7 @@
 import textwrap
 import unittest
 
-from ltms.brief import BriefError, from_topic, parse
+from ltms.brief import BriefError, from_topic, looks_like_brief, missing_brief, parse
 from ltms.config import ModelConfig
 from ltms.gui import _decode, _match, _model_options
 from ltms.llm import DetectedServer
@@ -89,6 +89,33 @@ class InlineTopic(unittest.TestCase):
 
     def test_has_no_source_file(self):
         self.assertIsNone(from_topic("anything", 3).path)
+
+
+class BriefPathGuard(unittest.TestCase):
+    """A mistyped path must fail loudly, not get researched as a topic."""
+
+    def test_a_plain_topic_is_not_a_path(self):
+        for topic in ["sqlite wal mode concurrency", "postgres vs mysql", "rust async"]:
+            self.assertFalse(missing_brief(topic), topic)
+            self.assertFalse(looks_like_brief(topic), topic)
+
+    def test_a_missing_markdown_file_is_caught(self):
+        self.assertTrue(missing_brief("research.md"))
+        self.assertTrue(missing_brief("notes/plan.markdown"))
+
+    def test_anything_shaped_like_a_path_is_caught(self):
+        for argument in ["/c/Users/me/wal.md", "C:\\notes\\wal.md", "./briefs/x"]:
+            self.assertTrue(missing_brief(argument), argument)
+
+    def test_an_existing_file_is_a_brief_not_a_miss(self):
+        import pathlib as pl
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = pl.Path(directory) / "b.md"
+            path.write_text("## queries\n- a search\n", encoding="utf-8")
+            self.assertTrue(looks_like_brief(str(path)))
+            self.assertFalse(missing_brief(str(path)))
 
 
 class CanonicalUrl(unittest.TestCase):

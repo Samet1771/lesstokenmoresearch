@@ -64,6 +64,10 @@ def cmd_research(args: argparse.Namespace, console: Console) -> int:
     try:
         if brief_mod.looks_like_brief(raw):
             brief = brief_mod.load(Path(raw))
+        elif brief_mod.missing_brief(raw):
+            print(f"failed · no such brief: {raw}", file=sys.stderr)
+            print("Pass an existing .md file, or a plain topic with no path in it.", file=sys.stderr)
+            return 2
         else:
             brief = brief_mod.from_topic(raw, EFFORTS[args.effort].queries)
     except brief_mod.BriefError as error:
@@ -109,9 +113,10 @@ def cmd_research(args: argparse.Namespace, console: Console) -> int:
         print(json.dumps(result))
     else:
         print(
-            f"done · {result.get('candidates', 0)} sources"
-            f" · {result.get('domains', 0)} domains"
-            f" · {result.get('sources_file', '')}"
+            f"done · {result.get('pages_read', 0)} sources read"
+            f" · {result.get('facts', 0)} facts"
+            f" · {result.get('report_tokens', 0)} tokens"
+            f" · {result.get('report', '')}"
         )
     return 0
 

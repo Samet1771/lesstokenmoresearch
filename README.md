@@ -10,11 +10,15 @@ ltms research.md
 ```
 
 ```
-done · 68 sources · 34 domains · ~/.config/ltms/runs/20260912-143002-how-does-postgres/report.md
+done · 5 sources read · 19 facts · 360 tokens · ~/.config/ltms/runs/20260912-141931-sqlite-wal/report.md
 ```
 
 That one line is the entire cost to the calling agent. The report is a file, so
 the agent reads all of it, part of it, or none of it.
+
+Measured on that run: 17,302 tokens of page text went into local models and a
+360-token report came back — 48x, or 494x if the agent only needs to know the
+research happened.
 
 ---
 
@@ -34,11 +38,33 @@ and argue on your hardware; only a compact sourced report crosses back.
       │
       ├─ plan     your queries, read from the brief
       ├─ search   parallel SearXNG queries
-      ├─ filter   dedupe, drop noise, cap per domain     (no LLM, free)
-      ├─ read     fetch pages, extract per-page evidence  ← phase 1
-      ├─ rank     order by the extractors' own relevance  ← phase 1
-      ├─ debate   role agents argue over the same pool    ← phase 2
-      └─ write    one editor produces a plain report      ← phase 2
+      ├─ filter   dedupe, drop noise, cap per domain    (no model, free)
+      ├─ read     fetch each page, one reader per page
+      ├─ rank     order by the readers' own relevance scores
+      ├─ debate   role agents argue over the same evidence
+      └─ write    one editor produces a plain report
+```
+
+Each page gets its own reader: one request carrying only the system prompt and
+that page, one markdown note written to disk, then the reader is gone. No
+reader shares a conversation with another, so one page cannot colour how the
+next is read and a reader that fails takes nothing down with it.
+
+The two model roles never overlap, so when reading finishes ltms evicts the
+reading model before the report model loads. Leaving both resident on a 16 GB
+card measured 17 GB, spilled the larger model into system RAM, and turned a
+two-minute report into a twenty-minute one.
+
+A run leaves everything behind:
+
+```
+runs/<id>/
+  brief.json        what was asked
+  sources.json      every candidate the search found
+  extracts/         one markdown note per page read
+  findings.json     the ranked evidence
+  report.md         the thing you read
+  progress.jsonl    the event stream the dashboard replays
 ```
 
 ## Write the brief
@@ -100,8 +126,9 @@ on. `ltms watch` is the lighter, non-interactive version of the same view.
 
 ## Status
 
-Early. Phase 0 (plan, search, filter) works end to end. Reading, ranking,
-debating and report writing are in progress.
+Early but complete end to end: a brief goes in, a sourced report comes out.
+Rough edges are in model handling rather than the pipeline — see the notes on
+picking models below.
 
 ## Requirements
 
@@ -109,10 +136,9 @@ debating and report writing are in progress.
 - **A local model server.** [LM Studio](https://lmstudio.ai) is the easiest:
   install it, download a model, and switch the local server on from the
   Developer tab. [Ollama](https://ollama.com), llama.cpp and vLLM work too.
-- **A container engine** — only for SearXNG, which ltms starts and stops for
-  you. On Linux and macOS that is Docker or Podman as usual. On Windows no
-  desktop app is needed: ltms drives Docker Engine inside WSL2, and the
-  installer sets that up.
+- **Docker** — only for SearXNG, which ltms starts and stops for you. On
+  Windows no desktop app is needed: ltms drives Docker Engine inside WSL2, and
+  the installer sets that up.
 
 A 14B class model at 4-bit is a good starting point on 16 GB of VRAM.
 
@@ -211,15 +237,26 @@ Windows path means nothing inside WSL.
 Leaving `name` blank is the normal way to use LM Studio: you pick the model in
 the app, and ltms uses whatever is loaded.
 
-`fast_name` matters more than it looks. Reading forty pages is bulk work, and
-throughput decides whether a run takes three minutes or an hour — on one 16 GB
-machine a 4B model read at 25 tok/s while a 27B reasoning model managed 4.8.
-Planning and the final report are a handful of calls where quality shows
-instead. The two phases never overlap, so both models do not have to fit in
-VRAM at once; the server swaps once per run.
+`fast_name` matters more than it looks. Reading pages is bulk work where
+throughput decides the length of a run; writing the report is a couple of calls
+where quality shows. The two phases never overlap, so both models do not have
+to fit in VRAM at once — ltms unloads the reader before the writer loads.
 
-Avoid reasoning models for the reading pass entirely: they spend their token
-budget thinking and return nothing.
+**Avoid reasoning models for either role.** They spend their budget thinking
+before they answer, and locally that is pure latency. The same brief, same six
+pages, on one 16 GB machine:
+
+| | 27B reasoning | 4B instruct |
+|---|---|---|
+| pages read | 4 | 5 |
+| facts extracted | 8 | 19 |
+| debate | 82s | 30s |
+| report | 96s, unusable | 34s, 360 tokens |
+
+The reasoning model spent 96% of its output thinking, then ran out of room
+before writing anything. ltms detects this and says so rather than shipping a
+transcript of deliberation as a report — but the fix is to pick a plain
+instruct model.
 
 Extractor agents run concurrently, so raise the server's own parallel-request
 limit to match `parallel` — otherwise the requests queue and nothing is gained.

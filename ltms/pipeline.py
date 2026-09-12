@@ -17,7 +17,11 @@ from dataclasses import dataclass
 from . import docker_mgr
 from .brief import Brief
 from .config import Config
+from .extract import EXTRACT_TOKENS, Extract, extract_many, rank, saved_tokens, thinking_share
+from .fetch import FetchStats, Page, fetch_many
 from .llm import estimate_tokens
+from .report import fallback_report, header, run_roles, write_report
+from . import residency
 from .runs import RunWriter
 from .search import SearxngBackend, dedupe_and_cap
 
@@ -118,23 +122,177 @@ async def run(
     snippet_tokens = sum(estimate_tokens(r.title + r.snippet) for r in outcome.results)
     writer.metric(candidates=len(outcome.results), tokens_saved=snippet_tokens)
 
-    # -------------------------------------------------------- not yet built
-    for stage in ("read", "rank", "debate", "write"):
-        writer.stage(stage, "skip", "phase 1+")
+    # ------------------------------------------------------------------ read
+    shortlist = outcome.results[:read_target]
+    writer.stage("read", "run")
+    writer.progress("read", 0, len(shortlist))
 
-    writer.note(f"sources written to {writer.dir / 'sources.json'}")
-    summary = f"{len(outcome.results)} sources from {domains} domains"
-    writer.end("ok", report=str(writer.dir / "sources.json"), summary=summary)
+    readers = max(1, config.model.parallel)
+    stats = FetchStats()
+    fetched = 0
+
+    def fetch_started(index: int, url: str) -> None:
+        writer.agent(f"scout-{index % readers + 1}", "fetch", url)
+
+    def fetch_finished(index: int, page: Page) -> None:
+        nonlocal fetched
+        fetched += 1
+        stats.record(page)
+        writer.progress("read", fetched, len(shortlist) * 2)
+
+    pages = await fetch_many(
+        [source.url for source in shortlist],
+        concurrency=min(8, max(4, readers * 2)),
+        on_start=fetch_started,
+        on_done=fetch_finished,
+    )
+
+    by_url = {source.url: source for source in shortlist}
+    for page in pages:
+        source = by_url.get(page.url)
+        if source and not page.title:
+            page.title = source.title
+
+    trouble = " · ".join(f"{count} {name}" for name, count in stats.failures.items())
+    writer.note(f"fetched {stats.fetched} pages, {stats.usable} readable" + (f" ({trouble})" if trouble else ""))
+
+    if stats.usable == 0:
+        writer.stage("read", "fail", "nothing readable")
+        writer.end("failed", summary="every page failed to fetch")
+        return {"status": "failed", "reason": "no readable pages"}
+
+    read_done = 0
+
+    def read_started(index: int, page: Page) -> None:
+        writer.agent(f"scout-{index % readers + 1}", "read", page.url)
+
+    def read_finished(index: int, extract: Extract) -> None:
+        nonlocal read_done
+        read_done += 1
+        # The reader's whole output, on disk, before it goes away.
+        writer.write_note(index, extract.url, extract.to_markdown())
+        writer.agent(f"scout-{index % readers + 1}", "idle", "", extract.relevance if extract.usable else None)
+        writer.progress("read", len(pages) + read_done, len(shortlist) * 2)
+
+    warning = residency.context_warning(config.model.for_role("fast"), EXTRACT_TOKENS + 7000)
+    if warning:
+        writer.note(warning, "warn")
+
+    extracts = await extract_many(
+        pages,
+        topic=brief.topic,
+        instructions=brief.instructions,
+        model_config=config.model.for_role("fast"),
+        concurrency=readers,
+        on_start=read_started,
+        on_done=read_finished,
+    )
+
+    for agent in range(1, readers + 1):
+        writer.agent(f"scout-{agent}", "done", "")
+
+    failed = [extract for extract in extracts if extract.error]
+    for extract in failed[:2]:
+        writer.note(f"read failed: {extract.error}", "warn")
+
+    usable = [extract for extract in extracts if extract.usable]
+    if not usable:
+        writer.stage("read", "fail", f"{len(extracts)} pages, none produced facts")
+        writer.end("failed", summary="the reading model returned nothing usable")
+        return {"status": "failed", "reason": "extraction produced nothing"}
+
+    thinking = thinking_share(extracts)
+    if thinking > 0.5:
+        writer.note(
+            f"the reading model spent {thinking:.0%} of its output thinking — "
+            "a plain instruct model would read these pages far faster",
+            "warn",
+        )
+
+    facts = sum(len(extract.facts) for extract in usable)
+    writer.stage("read", "ok", f"{len(usable)} pages read · {facts} facts")
+    writer.write_json("extracts.json", [extract.to_dict() for extract in extracts])
+
+    # ------------------------------------------------------------------ rank
+    writer.stage("rank", "run")
+    ordered = rank(extracts)
+    top = ordered[0].relevance if ordered else 0.0
+    writer.stage("rank", "ok", f"{len(ordered)} kept · best {top:.1f}")
+    writer.metric(tokens_saved=snippet_tokens + saved_tokens(pages, extracts), facts=facts)
+
+    writer.write_json("findings.json", [extract.to_dict() for extract in ordered])
+
+    # ---------------------------------------------------------------- debate
+    # Everything below runs on the report model. On one GPU that usually means
+    # the server swaps models here -- once, because reading is finished.
+    report_model = config.model.for_role("report")
+
+    # Reading is over. Evict the reader before the writer loads, or both sit in
+    # VRAM at once and the larger one spills into system memory.
+    freed = residency.release(config.model.for_role("fast"), report_model)
+    if freed:
+        writer.note(freed)
+
+    writer.stage("debate", "run")
+    writer.progress("debate", 0, preset.roles)
+    roles_done = 0
+
+    def role_started(role_id: str) -> None:
+        writer.agent(role_id, "think", "weighing the evidence")
+
+    def role_finished(role_id: str, ok: bool) -> None:
+        nonlocal roles_done
+        roles_done += 1
+        writer.agent(role_id, "done" if ok else "fail", "")
+        writer.progress("debate", roles_done, preset.roles)
+
+    memos = await run_roles(
+        brief, ordered, report_model, preset.roles, on_start=role_started, on_done=role_finished
+    )
+    if memos:
+        writer.stage("debate", "ok", f"{len(memos)} roles")
+    else:
+        writer.stage("debate", "warn", "no analyst memos — writing from evidence alone")
+
+    # ----------------------------------------------------------------- write
+    writer.stage("write", "run")
+    writer.agent("editor", "write", "report.md")
+    try:
+        body = await write_report(brief, ordered, memos, report_model, max_tokens=4500 if effort == "high" else 3500)
+    except Exception as error:  # noqa: BLE001 - the evidence is worth delivering regardless
+        writer.note(f"editor failed: {type(error).__name__} — writing raw findings", "warn")
+        body = ""
+
+    if not body:
+        body = fallback_report(brief, ordered)
+        writer.stage("write", "warn", "raw findings (no report model)")
+    else:
+        body = header(brief, ordered, writer.run_id) + body
+        writer.stage("write", "ok", f"{estimate_tokens(body)} tokens")
+    writer.agent("editor", "done", "")
+
+    writer.report_path.write_text(body, encoding="utf-8", newline="\n")
+
+    report_tokens = estimate_tokens(body)
+    writer.metric(
+        tokens_saved=snippet_tokens + saved_tokens(pages, extracts),
+        report_tokens=report_tokens,
+        facts=facts,
+    )
+
+    summary = f"{len(usable)} sources read · {facts} facts · {report_tokens} tokens"
+    writer.end("ok", report=str(writer.report_path), summary=summary)
 
     return {
         "status": "ok",
         "run_id": writer.run_id,
         "topic": brief.topic,
-        "queries": len(queries),
-        "questions": len(brief.questions),
         "candidates": len(outcome.results),
         "domains": domains,
-        "sources_file": str(writer.dir / "sources.json"),
+        "pages_read": len(usable),
+        "facts": facts,
+        "report_tokens": report_tokens,
+        "report": str(writer.report_path),
     }
 
 

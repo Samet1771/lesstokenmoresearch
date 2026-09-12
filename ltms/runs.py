@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlsplit
 
 PROGRESS_FILE = "progress.jsonl"
 REPORT_FILE = "report.md"
@@ -80,6 +81,13 @@ class RunWriter:
 
     def end(self, status: str, report: str = "", summary: str = "") -> None:
         self.emit("end", status=status, report=report, summary=summary)
+
+    def write_note(self, index: int, url: str, markdown: str) -> Path:
+        """One reader's note, named so the directory sorts the way the run ran."""
+        host = re.sub(r"^www\.", "", urlsplit(url).netloc.lower()) or "page"
+        path = self.dir / "extracts" / f"{index + 1:02d}-{_slug(host, 40)}.md"
+        path.write_text(markdown, encoding="utf-8", newline="\n")
+        return path
 
     def write_json(self, name: str, data: Any) -> Path:
         path = self.dir / name

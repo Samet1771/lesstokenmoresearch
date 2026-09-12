@@ -203,9 +203,28 @@ def from_topic(topic: str, count: int) -> Brief:
     return Brief(topic=topic, queries=queries)
 
 
+BRIEF_SUFFIXES = {".md", ".markdown", ".txt"}
+
+
 def looks_like_brief(argument: str) -> bool:
     """Is this argument a path to a brief rather than a topic to search?"""
     if not argument or "\n" in argument:
         return False
     candidate = Path(argument)
-    return candidate.suffix.lower() in {".md", ".markdown", ".txt"} and candidate.is_file()
+    return candidate.suffix.lower() in BRIEF_SUFFIXES and candidate.is_file()
+
+
+def missing_brief(argument: str) -> bool:
+    """Was a brief clearly meant, but the file is not there?
+
+    Without this a mistyped path is silently researched as though it were the
+    topic -- the caller gets a plausible-looking report about nothing, which is
+    worse than an error.
+    """
+    if not argument or "\n" in argument:
+        return False
+    candidate = Path(argument)
+    if candidate.is_file():
+        return False
+    looks_like_path = "/" in argument or "\\" in argument
+    return candidate.suffix.lower() in BRIEF_SUFFIXES or looks_like_path

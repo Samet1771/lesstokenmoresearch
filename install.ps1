@@ -192,12 +192,10 @@ function Install-Containers {
     if ($env:LTMS_SKIP_DOCKER -eq '1') { Info 'skipped'; return }
 
     # A native engine on PATH wins; nothing to set up.
-    foreach ($engine in @('docker', 'podman')) {
-        if (Have $engine) {
-            if ((Invoke-Native $engine @('info', '--format', '{{.ServerVersion}}')).ExitCode -eq 0) {
-                Ok "$engine is already running"
-                return
-            }
+    if (Have 'docker') {
+        if ((Invoke-Native 'docker' @('info', '--format', '{{.ServerVersion}}')).ExitCode -eq 0) {
+            Ok 'docker is already running'
+            return
         }
     }
 
