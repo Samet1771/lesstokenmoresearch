@@ -1,5 +1,6 @@
 """Command line entry point.
 
+    ltms                  open the console
     ltms brief.md         run research from a brief you wrote
     ltms "topic"          quick one-off, queries expanded from the topic
     ltms template         print a brief skeleton to fill in
@@ -51,10 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_research(args: argparse.Namespace, console: Console) -> int:
     raw = " ".join(args.topic).strip()
     if not raw:
+        # Nothing to do and a terminal to do it in: open the console rather
+        # than printing usage at someone who is clearly there to interact.
+        if console.is_terminal and not args.quiet:
+            return cmd_gui([], console)
         console.print("[red]nothing to research[/red]")
-        console.print("[dim]  ltms research.md            a brief you wrote[/dim]")
-        console.print("[dim]  ltms \"topic in a few words\"  quick one-off[/dim]")
-        console.print("[dim]  ltms template               print a brief to fill in[/dim]")
+        console.print("[dim]  ltms research.md              a brief you wrote[/dim]")
+        console.print("[dim]  ltms \"topic in a few words\"   quick one-off[/dim]")
+        console.print("[dim]  ltms gui                      the console[/dim]")
         return 2
 
     config = config_mod.load()

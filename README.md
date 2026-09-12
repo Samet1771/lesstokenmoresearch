@@ -98,31 +98,59 @@ For a quick one-off, `ltms "some topic"` expands the topic along a few plain
 angles instead — no model, no guessing, and reliably worse than queries you
 write yourself.
 
-## The window
+## The console
 
 ```bash
-ltms gui
+ltms
 ```
 
-Two tabs. **models** lists every chat model on every local server it can find —
-LM Studio, Ollama, llama.cpp, vLLM — and lets you pick two:
+A full-screen terminal app. Type a topic or a brief path and the run starts
+there; the transcript fills in as it happens rather than arriving at the end.
 
-- **report model** — writes the findings; quality shows here
-- **reading model** — reads every fetched page; throughput decides whether a
-  run takes three minutes or an hour
+```
+ _   _____ __  __ ___
+| | |_   _|  \/  / __|   LessTokenMoreSearch
+| |__ | | | |\/| \__ \   fewer tokens, more search
+|____||_| |_|  |_|___/
 
-The two can live on different servers: the big one loaded in LM Studio, a small
-fast one in Ollama. They never run at the same time, so both do not have to fit
-in VRAM together. Embedding and reranker models are filtered out of the lists,
-because picking one produces a baffling failure.
+ 14:19:31  ●  brief wal.md · 5 queries · effort low
+ 14:19:36  ✓  search  45 hits · 23 domains
+ 14:19:36  ✓  filter  25 kept  (10 duplicate · 3 domain_cap)
+ 14:19:38  ·  fetched 6 pages, 6 readable
+ 14:22:34  !  the reading model spent 76% of its output thinking
+ 14:22:34  ✓  read    5 pages read · 19 facts
+ 14:23:59  ◆  done    5 sources read · 19 facts · 360 tokens
+              ~/.config/ltms/runs/20260912-141931-sqlite-wal/report.md
 
-**runs** lists past and running research and shows the live dashboard —
-which stage is going, which page each reader has open, how many tokens have
-been kept out of the calling agent's context.
+ ⠴ read     ━━━━━━━━━━╸───────  7/12
+   scout-1  ◉ reading   sqlite.org/wal.html
+   scout-2  ◌ fetching  berthub.eu/articles/posts/…
 
-The same window opens by itself when an agent starts a run. It is a separate
-read-only process: if it fails to open, or you close it, the research carries
-on. `ltms watch` is the lighter, non-interactive version of the same view.
+┌────────────────────────────────────────────────────────────────────────┐
+│ sqlite wal mode concurrency --low                                      │
+└────────────────────────────────────────────────────────────────────────┘
+ gemma-4-e4b   read minicpm5-2b   docker in WSL   saved 17k   2:41   /help
+```
+
+| | |
+|---|---|
+| `<topic>` or `<brief.md>` | start a run, `--low --medium --high` to set effort |
+| `/models` | pick the reading model and the report model |
+| `/runs` | past runs; press 1-9 to replay one |
+| `/watch` | replay the last run into the transcript |
+| `/status` | what ltms can see on this machine |
+| `/template` | print a brief skeleton |
+| `/stop` | stop the SearXNG container |
+| `/clear` `/help` `/quit` | |
+
+`/models` lists every chat model on every local server it can find — LM Studio,
+Ollama, llama.cpp, vLLM — and the two roles can live on different servers: the
+big one loaded in LM Studio, a small fast one in Ollama. Embedding and reranker
+models are filtered out, because picking one produces a baffling failure.
+
+The same console opens by itself when an agent starts a run, attached to that
+run. It is a separate read-only process: if it fails to open, or you close it,
+the research carries on. `ltms watch` is the smaller non-interactive view.
 
 ## Status
 
@@ -191,8 +219,9 @@ For web research, do not fetch pages yourself. Instead:
 |---|---|
 | `ltms brief.md` | run research from a brief |
 | `ltms "topic"` | quick one-off research |
+| `ltms` | open the console |
 | `ltms template` | print a brief skeleton |
-| `ltms gui` | the window: pick models, watch runs |
+| `ltms gui` | the console, same thing |
 | `ltms init` | interactive setup from the terminal |
 | `ltms watch [run]` | attach the plain dashboard to a run |
 | `ltms runs` | list recent runs |
