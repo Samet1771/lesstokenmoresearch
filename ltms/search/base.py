@@ -15,6 +15,12 @@ TRACKING_PARAMS = re.compile(r"^(utm_|ref_|mc_|pk_|yclid|gclid|fbclid|igshid|si|
 
 # Domains that reliably produce noise for research: aggregators of aggregators,
 # link farms, and walled gardens whose content we cannot read anyway.
+#
+# The second group is measured rather than assumed. Fetching 130 pages from
+# past runs, every one of these returned a JavaScript shell or a login wall --
+# between 6 and 400 characters of text, none of it the content. They are worth
+# dropping before the fetch rather than after: a candidate that cannot be read
+# occupies a reading slot that a readable page could have had.
 NOISE_DOMAINS = {
     "pinterest.com",
     "quora.com",
@@ -23,6 +29,18 @@ NOISE_DOMAINS = {
     "coursehero.com",
     "researchgate.net",  # blocks automated reads behind an interstitial
     "academia.edu",
+    # JavaScript applications and login walls -- nothing to extract.
+    "youtube.com",
+    "youtu.be",
+    "instagram.com",
+    "tiktok.com",
+    "facebook.com",
+    "x.com",
+    "twitter.com",
+    "linkedin.com",
+    "reddit.com",  # old.reddit is blocked too; measured 39 characters
+    "spotify.com",
+    "music.apple.com",
 }
 
 

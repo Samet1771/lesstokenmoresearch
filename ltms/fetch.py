@@ -25,6 +25,15 @@ USER_AGENT = (
 MAX_BYTES = 5 * 1024 * 1024  # a page bigger than this is not prose
 MIN_USEFUL_CHARS = 400  # below this there is nothing to extract
 
+# One request at a time per host, with a gap between them. Research fetches
+# several pages from the same documentation site, and hitting it with eight at
+# once is how a run earns its own 429.
+PER_HOST_GAP = 0.7
+# 429 and 503 usually come with Retry-After. Waiting the asked-for time gets
+# the page; ignoring it gets a longer ban. Anything beyond this is not worth
+# holding a run for.
+MAX_RETRY_WAIT = 12.0
+
 WHITESPACE = re.compile(r"[ \t ]+")
 BLANK_LINES = re.compile(r"\n{3,}")
 
@@ -32,6 +41,15 @@ BLANK_LINES = re.compile(r"\n{3,}")
 WALL_PATTERNS = re.compile(
     r"(enable javascript|are you a robot|verify you are human|checking your browser"
     r"|access denied|subscribe to (continue|read)|create a free account to)",
+    re.I,
+)
+
+# An anti-bot challenge rather than a server that is merely unhappy. Worth
+# telling apart: a 403 might be fixed by asking differently, a challenge is the
+# site saying it does not want automated readers, and we take it at its word.
+CHALLENGE_PATTERNS = re.compile(
+    r"(just a moment|cf-chl|captcha|/cdn-cgi/challenge|checking if the site connection"
+    r"|enable javascript and cookies to continue|attention required)",
     re.I,
 )
 
@@ -77,24 +95,42 @@ def tidy(text: str) -> str:
 
 
 def html_to_text(html: str, url: str) -> tuple[str, str]:
-    """Return (title, text). Uses trafilatura when present, else a plain strip."""
+    """Return (title, text). Uses trafilatura when present, else a plain strip.
+
+    trafilatura aims at the article and ignores everything else, which is right
+    almost always and disastrous on the pages where it finds nothing: a page we
+    successfully fetched is thrown away over a layout it did not recognise.
+    Measured across 130 fetched pages, 30 came back under the useful threshold
+    and stripping the tags by hand rescued 9 of them. So when the careful path
+    returns too little, take whichever is longer.
+    """
+    title = ""
+    extracted = ""
     try:
         import trafilatura
 
-        extracted = trafilatura.extract(
-            html,
-            url=url,
-            include_comments=False,
-            include_tables=True,
-            favor_precision=True,
+        extracted = tidy(
+            trafilatura.extract(
+                html,
+                url=url,
+                include_comments=False,
+                include_tables=True,
+                favor_precision=True,
+            )
+            or ""
         )
         metadata = trafilatura.extract_metadata(html)
         title = (getattr(metadata, "title", "") or "") if metadata else ""
-        if extracted:
-            return title, tidy(extracted)
     except Exception:  # noqa: BLE001 - fall through to the crude path
         pass
-    return _strip_tags(html)
+
+    if len(extracted) >= MIN_USEFUL_CHARS:
+        return title, extracted
+
+    crude_title, crude = _strip_tags(html)
+    if len(crude) > len(extracted):
+        return title or crude_title, crude
+    return title or crude_title, extracted
 
 
 def _strip_tags(html: str) -> tuple[str, str]:
@@ -125,16 +161,39 @@ def pdf_to_text(payload: bytes) -> tuple[str, str]:
     return str(title), tidy("\n\n".join(pages))
 
 
+def retry_delay(response: httpx.Response) -> float:
+    """How long the server asked us to wait, clamped to something bearable."""
+    raw = (response.headers.get("retry-after") or "").strip()
+    try:
+        wait = float(raw)
+    except ValueError:
+        wait = 3.0 if raw else 2.0
+    return min(max(wait, 0.5), MAX_RETRY_WAIT)
+
+
 async def fetch_one(client: httpx.AsyncClient, url: str) -> Page:
     page = Page(url=url)
     try:
         response = await client.get(url)
+        # 429 and 503 are "not now", not "no". The server usually says how long
+        # to wait; one patient retry costs a few seconds and often gets a page
+        # that would otherwise be written off.
+        if response.status_code in (429, 503):
+            wait = retry_delay(response)
+            if wait <= MAX_RETRY_WAIT:
+                await asyncio.sleep(wait)
+                response = await client.get(url)
     except httpx.HTTPError as error:
         page.error = f"{type(error).__name__}"
         return page
 
     if response.status_code >= 400:
-        page.error = f"http {response.status_code}"
+        looks_like_html = "html" in response.headers.get("content-type", "").lower()
+        if looks_like_html and CHALLENGE_PATTERNS.search(response.text[:4000]):
+            page.blocked = True
+            page.error = "anti-bot challenge"
+        else:
+            page.error = f"http {response.status_code}"
         return page
 
     content_type = response.headers.get("content-type", "").lower()
@@ -172,7 +231,12 @@ async def fetch_many(
 ) -> list[Page]:
     """Fetch in parallel, never letting one bad host hold up the run."""
     gate = asyncio.Semaphore(max(1, concurrency))
+    # One lock per host: parallelism across sites, politeness within one.
+    hosts: dict[str, asyncio.Lock] = {}
     pages: list[Page] = [Page(url=url) for url in urls]
+
+    def host_of(url: str) -> str:
+        return url.split("/")[2].lower() if "://" in url else url
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout, connect=8.0),
@@ -183,18 +247,26 @@ async def fetch_many(
             "accept-language": "en;q=0.9,*;q=0.5",
         },
         max_redirects=4,
+        # Browsers speak HTTP/2; a client that only speaks 1.1 stands out to
+        # the protections sitting in front of these sites.
+        http2=True,
     ) as client:
 
         async def one(index: int, url: str) -> None:
-            async with gate:
-                if on_start:
-                    on_start(index, url)
-                try:
-                    pages[index] = await fetch_one(client, url)
-                except Exception as error:  # noqa: BLE001 - never kill the batch
-                    pages[index] = Page(url=url, error=type(error).__name__)
-                if on_done:
-                    on_done(index, pages[index])
+            lock = hosts.setdefault(host_of(url), asyncio.Lock())
+            async with lock:
+                async with gate:
+                    if on_start:
+                        on_start(index, url)
+                    try:
+                        pages[index] = await fetch_one(client, url)
+                    except Exception as error:  # noqa: BLE001 - never kill the batch
+                        pages[index] = Page(url=url, error=type(error).__name__)
+                    if on_done:
+                        on_done(index, pages[index])
+                # The host lock is held a moment longer, but the global slot is
+                # already free: other sites keep moving while this one rests.
+                await asyncio.sleep(PER_HOST_GAP)
 
         await asyncio.gather(*(one(i, url) for i, url in enumerate(urls)))
 

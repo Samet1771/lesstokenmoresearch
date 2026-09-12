@@ -158,9 +158,8 @@ async def run(
     writer.metric(candidates=len(outcome.results), tokens_saved=snippet_tokens)
 
     # ------------------------------------------------------------------ read
-    shortlist = outcome.results[:read_target]
     writer.stage("read", "run")
-    writer.progress("read", 0, len(shortlist))
+    writer.progress("read", 0, read_target * 2)
 
     readers = max(1, config.model.parallel)
     stats = FetchStats()
@@ -173,23 +172,40 @@ async def run(
         nonlocal fetched
         fetched += 1
         stats.record(page)
-        writer.progress("read", fetched, len(shortlist) * 2)
+        writer.progress("read", min(fetched, read_target), read_target * 2)
 
-    pages = await fetch_many(
-        [source.url for source in shortlist],
-        concurrency=min(8, max(4, readers * 2)),
-        on_start=fetch_started,
-        on_done=fetch_finished,
-    )
-
-    by_url = {source.url: source for source in shortlist}
-    for page in pages:
-        source = by_url.get(page.url)
-        if source and not page.title:
-            page.title = source.title
+    # Roughly a fifth of the web refuses an automated reader -- 403s, anti-bot
+    # challenges, paywalls, pages that are a JavaScript shell. Taking the top
+    # `read_target` candidates and accepting whatever survives means a run asked
+    # for 30 pages and read 18. The run does not care which pages it reads, only
+    # that it reads enough of them, so keep pulling from the candidate pool
+    # until the target is met or the pool is exhausted.
+    pages: list[Page] = []
+    by_url = {source.url: source for source in outcome.results}
+    attempted = 0
+    ceiling = min(len(outcome.results), read_target * 3)
+    while len(pages) < read_target and attempted < ceiling:
+        wave = outcome.results[attempted : attempted + (read_target - len(pages))]
+        if not wave:
+            break
+        attempted += len(wave)
+        found = await fetch_many(
+            [source.url for source in wave],
+            concurrency=min(8, max(4, readers * 2)),
+            on_start=fetch_started,
+            on_done=fetch_finished,
+        )
+        for page in found:
+            source = by_url.get(page.url)
+            if source and not page.title:
+                page.title = source.title
+            if page.usable:
+                pages.append(page)
 
     trouble = " · ".join(f"{count} {name}" for name, count in stats.failures.items())
     writer.note(f"fetched {stats.fetched} pages, {stats.usable} readable" + (f" ({trouble})" if trouble else ""))
+    if stats.fetched > len(pages) and pages:
+        writer.note(f"replaced {stats.fetched - len(pages)} unreadable pages from the candidate pool")
 
     if stats.usable == 0:
         writer.stage("read", "fail", "nothing readable")
@@ -207,7 +223,7 @@ async def run(
         # The reader's whole output, on disk, before it goes away.
         writer.write_note(index, extract.url, extract.to_markdown())
         writer.agent(f"scout-{index % readers + 1}", "idle", "", extract.relevance if extract.usable else None)
-        writer.progress("read", len(pages) + read_done, len(shortlist) * 2)
+        writer.progress("read", read_target + read_done, read_target * 2)
 
     warning = residency.context_warning(config.model.for_role("fast"), EXTRACT_HEADROOM + 7000)
     if warning:

@@ -227,6 +227,18 @@ async def extract_many(
                 for page in usable
             ]
 
+        # LM Studio loads a model when the first request needs it, and requests
+        # that arrive during that load fail. Reading starts right after the
+        # previous model was evicted, so the readers always arrive cold.
+        # Measured: four parallel readers at a cold model gave 500s; one
+        # warm-up call first, then the same four, gave none. Costs ~3 seconds
+        # once, against nine pages lost in a real run.
+        if concurrency > 1:
+            try:
+                await model.chat(system="Reply with ok.", user="ok", max_tokens=4, client=client)
+            except ModelError:
+                pass  # a cold model can answer nothing; the load still happened
+
         async def read(page: Page, limit: int) -> "tuple[Extract, int]":
             reply = await model.chat(
                 system=SYSTEM,

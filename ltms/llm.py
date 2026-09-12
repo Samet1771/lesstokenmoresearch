@@ -47,6 +47,30 @@ def strip_thinking(text: str) -> str:
     return THINK_BLOCK.sub("", text).strip()
 
 
+def server_detail(response: "httpx.Response") -> str:
+    """What went wrong, in words rather than in markup.
+
+    A model server in trouble answers with its framework's HTML error page, and
+    quoting the first 300 characters of that puts `<!DOCTYPE html>` in front of
+    the user instead of the problem.
+    """
+    body = response.text.strip()
+    if body[:1] == "{":
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        error = payload.get("error") if isinstance(payload, dict) else None
+        message = error.get("message") if isinstance(error, dict) else error
+        if message:
+            return str(message)[:300]
+    if body[:1] == "<":
+        text = re.sub(r"<[^>]+>", " ", body)
+        text = " ".join(text.split())
+        return text[:200] or f"an HTML error page ({len(body)} bytes)"
+    return body[:300]
+
+
 class LocalModel:
     def __init__(self, config: ModelConfig) -> None:
         self.config = config
@@ -200,7 +224,7 @@ class LocalModel:
         except httpx.HTTPError as error:
             raise ModelError(f"cannot reach model server at {base}: {error}") from error
         if response.status_code != 200:
-            raise ModelError(f"model server {response.status_code}: {response.text[:300]}")
+            raise ModelError(f"model server {response.status_code}: {server_detail(response)}")
 
         data = response.json()
         usage = data.get("usage") or {}

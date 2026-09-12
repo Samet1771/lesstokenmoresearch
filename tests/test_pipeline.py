@@ -7,7 +7,13 @@ from ltms.extract import (
     CONTEXT_REFUSAL, Extract, _first_json_object, build_prompt, parse_extract, rank,
     saved_tokens, thinking_share, trim,
 )
-from ltms.fetch import FetchStats, Page, html_to_text, tidy
+import httpx
+
+import ltms.fetch
+from ltms.fetch import (
+    MAX_RETRY_WAIT, MIN_USEFUL_CHARS, FetchStats, Page,
+    fetch_many, html_to_text, retry_delay, tidy,
+)
 from ltms.report import ROLES, numbered_evidence, fallback_report
 
 
@@ -40,6 +46,85 @@ class HtmlText(unittest.TestCase):
     def test_leaves_out_scripts(self):
         _, text = html_to_text(self.HTML, "https://example.com")
         self.assertNotIn("var tracking", text)
+
+    # trafilatura goes for the article and ignores the rest, which is right
+    # until it recognises nothing and hands back a page we already paid to
+    # fetch as an empty string.
+    UNRECOGNISED = (
+        "<html><head><title>Odd Layout</title></head><body>"
+        + "".join(f"<span>fact number {i} about sqlite wal journalling</span>" for i in range(40))
+        + "</body></html>"
+    )
+
+    def test_a_layout_trafilatura_misses_is_not_thrown_away(self):
+        _, text = html_to_text(self.UNRECOGNISED, "https://example.com")
+        self.assertGreaterEqual(len(text), MIN_USEFUL_CHARS)
+        self.assertIn("fact number 7", text)
+
+    def test_the_careful_extraction_still_wins_when_it_works(self):
+        _, text = html_to_text(self.HTML, "https://example.com")
+        self.assertNotIn("menu menu menu", text)
+
+
+class RetryAfter(unittest.TestCase):
+    """429 and 503 are 'not now'. The server usually says how long."""
+
+    def response(self, value):
+        return httpx.Response(429, headers={"retry-after": value} if value is not None else {})
+
+    def test_a_plain_number_of_seconds_is_honoured(self):
+        self.assertEqual(retry_delay(self.response("5")), 5.0)
+
+    def test_an_absurd_wait_is_clamped(self):
+        self.assertEqual(retry_delay(self.response("600")), MAX_RETRY_WAIT)
+
+    def test_a_date_or_no_header_still_waits_a_little(self):
+        self.assertGreater(retry_delay(self.response("Wed, 21 Oct 2026 07:28:00 GMT")), 0)
+        self.assertGreater(retry_delay(self.response(None)), 0)
+
+
+class HostPoliteness(unittest.TestCase):
+    """Several pages from one site is normal in research. Eight at once is how
+    a run earns its own 429."""
+
+    def test_one_host_is_fetched_one_page_at_a_time(self):
+        import asyncio
+
+        overlap = {"now": 0, "peak": 0}
+        order: list[str] = []
+
+        async def handler(request):
+            overlap["now"] += 1
+            overlap["peak"] = max(overlap["peak"], overlap["now"])
+            order.append(str(request.url))
+            await asyncio.sleep(0.02)
+            overlap["now"] -= 1
+            return httpx.Response(200, headers={"content-type": "text/html"},
+                                  text="<html><body><p>" + "word " * 200 + "</p></body></html>")
+
+        original = httpx.AsyncClient
+
+        class Mocked(original):
+            def __init__(self, *args, **kwargs):
+                kwargs.pop("http2", None)
+                kwargs["transport"] = httpx.MockTransport(handler)
+                super().__init__(*args, **kwargs)
+
+        urls = [f"https://one.test/page{i}" for i in range(4)]
+        httpx.AsyncClient = Mocked
+        try:
+            # PER_HOST_GAP would make this take three seconds of real time.
+            saved, ltms.fetch.PER_HOST_GAP = ltms.fetch.PER_HOST_GAP, 0.0
+            try:
+                pages = asyncio.run(fetch_many(urls, concurrency=8))
+            finally:
+                ltms.fetch.PER_HOST_GAP = saved
+        finally:
+            httpx.AsyncClient = original
+
+        self.assertEqual(overlap["peak"], 1, "two requests hit the same host at once")
+        self.assertEqual(len(pages), 4)
+        self.assertTrue(all(p.usable for p in pages))
 
 
 class PageUsability(unittest.TestCase):

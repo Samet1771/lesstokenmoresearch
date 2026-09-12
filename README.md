@@ -322,6 +322,42 @@ once they all refuse. Three things keep a run working through that:
 When engines do refuse, ltms names them and says so, rather than reporting
 "no results" and sending you looking for a bug in your query.
 
+### Pages that refuse to be read
+
+About a fifth of the open web will not be read by a program. Fetching 180 URLs
+from real runs: 38 refused — 18 Cloudflare challenges, 15 plain 403s, 3
+CAPTCHAs, 2 paywalls. Another 23% of the pages that *did* return 200 held less
+than a paragraph of extractable text.
+
+**ltms does not try to defeat any of that.** No CAPTCHA solving, no challenge
+tokens, no pretending to be a browser it is not. A site that says it does not
+want automated readers is taken at its word. What ltms does instead is stop
+letting those pages cost anything:
+
+- **A refused page is replaced, not mourned.** The run keeps pulling from the
+  candidate pool until it has as many readable pages as it asked for. Reading
+  the top N and accepting what survives turned "read 30 pages" into 18 read; a
+  measured run now fetches 14 to read 10.
+- **Hosts that are never readable are dropped before the fetch.** YouTube,
+  Instagram, Reddit, Spotify and friends return a JavaScript shell — measured
+  at 6 to 400 characters. They cost a fetch and a reading slot for nothing.
+- **A page trafilatura cannot parse is not thrown away.** When the careful
+  extractor finds nothing, a plain tag strip runs instead: 9 of 30 otherwise
+  empty pages came back usable.
+- **One request at a time per host**, with a gap. Several pages from one
+  documentation site is normal in research; eight at once is how a run earns
+  its own 429.
+- **`Retry-After` is honoured.** A 429 or 503 gets one patient retry for as
+  long as the server asked, up to 12 seconds.
+- **HTTP/2**, because every browser speaks it and a client that does not stands
+  out to the protections in front of these sites.
+
+A blocked page is reported as `anti-bot challenge` rather than `http 403`, so
+the run log says what actually happened.
+
+Archive.org was measured as a fallback for blocked pages and did not earn its
+place: of 10 blocked URLs, 2 had a usable snapshot.
+
 On Windows the container runs inside WSL2 and ltms talks to it through
 `wsl -d <distro> -u root -- docker`. WSL2 forwards localhost, so the published
 port is reachable from Windows at the same address. The settings file is

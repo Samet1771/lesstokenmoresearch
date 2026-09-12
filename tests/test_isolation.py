@@ -61,7 +61,10 @@ def run_extraction(page_list: list[Page], concurrency: int = 1) -> list[dict]:
         )
     finally:
         httpx.AsyncClient = original
-    return sent
+    # Parallel reading opens with a warm-up call, so a cold model finishes
+    # loading before the readers arrive. It carries no page; the reader
+    # requests are what this file is about.
+    return [body for body in sent if "PAGE" in " ".join(m["content"] for m in body["messages"])]
 
 
 def run_report() -> list[dict]:
@@ -117,6 +120,27 @@ class ReaderIsolation(unittest.TestCase):
         # high does nothing.
         for body in run_extraction(pages(2)):
             self.assertNotIn("max_tokens", body)
+
+    def test_the_warm_up_call_carries_no_page(self):
+        sent = []
+        original = httpx.AsyncClient
+
+        class Mocked(original):
+            def __init__(self, *args, **kwargs):
+                kwargs["transport"] = httpx.MockTransport(capture(sent))
+                super().__init__(*args, **kwargs)
+
+        httpx.AsyncClient = Mocked
+        try:
+            asyncio.run(extract_many(pages(2), "sqlite wal", "", ModelConfig(name="m"), concurrency=2))
+        finally:
+            httpx.AsyncClient = original
+
+        self.assertEqual(len(sent), 3, "expected one warm-up plus two readers")
+        warm_up = sent[0]
+        text = " ".join(message["content"] for message in warm_up["messages"])
+        self.assertNotIn("MARKER-", text)
+        self.assertLess(len(text), 40)
 
     def test_isolation_holds_when_readers_run_in_parallel(self):
         bodies = run_extraction(pages(4), concurrency=4)

@@ -206,6 +206,81 @@ class WholePipeline(unittest.TestCase):
         high, _, _ = self.run_pipeline(effort="high")
         self.assertEqual(low["status"], high["status"], "both should complete")
 
+class BlockedPagesDoNotCostSources(unittest.TestCase):
+    """A page that refuses to be read should cost a fetch, not a source.
+
+    Measured on 180 URLs from real runs: about a fifth answer 403, an anti-bot
+    challenge or a JavaScript shell. Reading the top N candidates and keeping
+    whatever survives turned "read 30 pages" into 18.
+    """
+
+    def setUp(self) -> None:
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+
+    def run_with(self, fetcher, read_limit=4):
+        with Harness() as harness:
+            FakeBackend.results_per_query = 12
+            self.addCleanup(setattr, FakeBackend, "results_per_query", 6)
+            pipeline.fetch_many = fetcher
+            writer = RunWriter(Path(self._home.name) / "runs", "test-run")
+            result = pipeline.run_sync(BRIEF, "low", Config(), writer, read_limit=read_limit)
+        return result, writer
+
+    def test_the_target_is_met_by_pulling_more_candidates(self):
+        attempted: list[str] = []
+
+        async def half_of_them_refuse(urls, concurrency=8, timeout=20.0, on_start=None, on_done=None):
+            pages = []
+            for index, url in enumerate(urls):
+                attempted.append(url)
+                ok = len(attempted) % 2 == 1
+                page = (
+                    Page(url=url, title="ok", text="body " * 200, chars=1000)
+                    if ok
+                    else Page(url=url, error="anti-bot challenge", blocked=True)
+                )
+                if on_start:
+                    on_start(index, url)
+                if on_done:
+                    on_done(index, page)
+                pages.append(page)
+            return pages
+
+        result, _ = self.run_with(half_of_them_refuse)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["pages_read"], 4, "backfill did not reach the target")
+        self.assertGreater(len(attempted), 4, "no replacements were fetched")
+        self.assertEqual(len(attempted), len(set(attempted)), "a page was fetched twice")
+
+    def test_a_thin_pool_still_delivers_what_it_can(self):
+        async def all_refuse_after_two(urls, concurrency=8, timeout=20.0, on_start=None, on_done=None):
+            pages = []
+            for index, url in enumerate(urls):
+                ok = url.endswith(("site0.test/p", "site1.test/p"))
+                page = (
+                    Page(url=url, title="ok", text="body " * 200, chars=1000)
+                    if ok
+                    else Page(url=url, error="http 403")
+                )
+                if on_start:
+                    on_start(index, url)
+                if on_done:
+                    on_done(index, page)
+                pages.append(page)
+            return pages
+
+        result, _ = self.run_with(all_refuse_after_two)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["pages_read"], 2)
+
+    def test_nothing_readable_anywhere_is_still_a_clean_failure(self):
+        async def everything_refuses(urls, concurrency=8, timeout=20.0, on_start=None, on_done=None):
+            return [Page(url=url, error="http 403") for url in urls]
+
+        result, _ = self.run_with(everything_refuses)
+        self.assertEqual(result["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()
